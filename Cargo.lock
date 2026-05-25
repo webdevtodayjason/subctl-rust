@@ -421,6 +421,7 @@ name = "evy"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "evy-comms",
  "evy-core",
  "evy-memory",
@@ -429,6 +430,7 @@ dependencies = [
  "evy-scheduler",
  "figment",
  "serde",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

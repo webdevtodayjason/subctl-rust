@@ -1,0 +1,31 @@
+# Minimal policy.toml for the Phase 1 (Slice E) smoke test.
+#
+# Schema matches `crates/evy-policy/tests/fixtures/install/config/policy/defaults.toml`,
+# which is the canonical "this parses" reference. The smoke test exercises
+# `check_command_simple("ls -la", &policy, Mode::Trusted)` — Trusted mode
+# short-circuits to Allow regardless of the gated rules, so the rule set
+# below is purely illustrative.
+
+default_mode = "gated"
+preset = "generic"
+
+[mode.gated]
+
+[mode.gated.allow]
+commands = ["ls", "pwd", "echo", "cat", "find", "head", "tail"]
+
+[mode.gated.deny_always]
+substrings = [
+  "rm -rf /",
+  "rm -rf $HOME",
+  ":(){:|:&};:",
+  "dd if=/dev/zero of=/dev/sd",
+  "mkfs.",
+  "shred -uvz",
+]
+regex = [
+  '\bnode\s+-e\b',
+  '\bpython3?\s+-c\b',
+  '\bbash\s+-c\b',
+  '\bsh\s+-c\b',
+]

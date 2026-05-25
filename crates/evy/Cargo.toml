@@ -8,12 +8,18 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lib]
+name = "evy"
+path = "src/lib.rs"
+
 [[bin]]
 name = "evy"
 path = "src/main.rs"
 
 [dependencies]
-# Library primitives (all six wired in; not yet used by main.rs body)
+# Library primitives. Phase 1 wires evy-core / evy-policy / evy-providers /
+# evy-scheduler end-to-end; evy-comms and evy-memory remain declared but
+# unconsumed pending Phase 2 (see TODO markers in src/lib.rs).
 evy-core = { workspace = true }
 evy-policy = { workspace = true }
 evy-providers = { workspace = true }
@@ -30,3 +36,9 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 figment = { workspace = true }
 serde = { workspace = true }
+
+# Cron-aware timestamps for log lines + future "next fire" diagnostics.
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3"

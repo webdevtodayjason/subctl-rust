@@ -1,0 +1,32 @@
+# Evy v4 daemon configuration. Layered: this file is the lowest priority,
+# overridden by env vars matching `EVY_<SECTION>__<KEY>` (double-underscore
+# is the section/key delimiter; figment's standard nested-env shape).
+#
+# Phase 1 (Slice E) — wires scheduler + policy + providers and runs the
+# Slice E smoke test. The default `db_path` lives in /tmp because the
+# smoke test must not pollute the operator's real state.
+
+[scheduler]
+db_path = "/tmp/evy-phase1-smoke.db"
+
+[policy]
+path = "config/policy.toml"
+
+# At least one of `claude_code` / `codex` must be present. The smoke test
+# constructs every configured provider, exercises healthcheck against it,
+# and logs the result. We do NOT dispatch real mandates in Phase 1.
+
+[providers.claude_code]
+# `CLAUDE_CONFIG_DIR` — per-account isolation. /tmp/claude-jason is a
+# pre-existing operator-managed dir on the dev box; substitute as needed.
+config_dir = "/tmp/claude-jason"
+tmux_session = "claude-smoke"
+working_dir = "."
+policy_mode = "Trusted"
+
+[providers.codex]
+# `CODEX_HOME` — Codex CLI reads `auth.json` + `config.toml` from here.
+codex_home = "/tmp/codex-smoke"
+tmux_session = "codex-smoke"
+working_dir = "."
+policy_mode = "Trusted"

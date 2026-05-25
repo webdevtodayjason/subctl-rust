@@ -1,16 +1,27 @@
-use anyhow::Result;
-use tracing_subscriber::EnvFilter;
+//! Evy v4 daemon binary entry point.
+//!
+//! Phase 1 wiring — scheduler + policy + providers integrated end-to-end.
+//! See ADR 0020 for architectural context.
+//!
+//! The wiring lives in [`evy::run_daemon`]; this file is a thin entry so
+//! the integration test in `crates/evy/tests/smoke.rs` can drive the
+//! same code path without spawning a subprocess.
+
+use anyhow::{Context, Result};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("evy=info".parse()?))
-        .with_target(false)
-        .init();
+    evy::init_tracing();
 
-    tracing::info!("Evy v4 — scaffold only. No primitives wired yet. See ADR 0020.");
+    let config = evy::Config::load().context("loading evy config")?;
+    tracing::info!(?config, "evy v4 booting");
+
+    let report = evy::run_daemon(config).await?;
+    tracing::info!(
+        job_id = %report.job_id,
+        fire_latency_ms = u64::try_from(report.fire_latency.as_millis()).unwrap_or(u64::MAX),
+        total_ms = u64::try_from(report.total_wall_clock.as_millis()).unwrap_or(u64::MAX),
+        "phase 1 smoke report",
+    );
     Ok(())
 }
-
-// TODO: Phase 1+ — wire evy-core / evy-policy / evy-providers / evy-scheduler /
-// evy-comms / evy-memory per ADR 0020 in the parent subctl repo.
