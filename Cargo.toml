@@ -1,0 +1,68 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/evy-core",
+    "crates/evy-policy",
+    "crates/evy-providers",
+    "crates/evy-scheduler",
+    "crates/evy-comms",
+    "crates/evy-memory",
+    "crates/evy",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+authors = ["Jason Brashear <jbrashear@titaniumcomputing.com>"]
+license = "MIT"
+repository = "https://github.com/webdevtodayjason/subctl-rust"
+homepage = "https://github.com/webdevtodayjason/subctl-rust"
+readme = "../../README.md"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP
+axum = "0.8"
+
+# Storage
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+    "sqlite",
+    "macros",
+    "migrate",
+] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+
+# Config (layered)
+figment = { version = "0.10", features = ["toml", "env"] }
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Errors
+thiserror = "2"
+anyhow = "1"
+
+# CLI (declared for future subctl CLI; not consumed by the daemon yet)
+clap = { version = "4", features = ["derive"] }
+
+# Internal workspace crates
+evy-core = { path = "crates/evy-core", version = "0.1.0" }
+evy-policy = { path = "crates/evy-policy", version = "0.1.0" }
+evy-providers = { path = "crates/evy-providers", version = "0.1.0" }
+evy-scheduler = { path = "crates/evy-scheduler", version = "0.1.0" }
+evy-comms = { path = "crates/evy-comms", version = "0.1.0" }
+evy-memory = { path = "crates/evy-memory", version = "0.1.0" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

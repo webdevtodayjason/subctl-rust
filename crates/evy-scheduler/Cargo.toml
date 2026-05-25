@@ -1,0 +1,17 @@
+[package]
+name = "evy-scheduler"
+description = "Evy v4 cron-shaped job runner; operator-definable jobs, persisted, survives restart."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+evy-core = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

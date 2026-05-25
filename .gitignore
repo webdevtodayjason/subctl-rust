@@ -1,0 +1,25 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# macOS
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Env / secrets
+.env
+.env.local
+
+# SQLite scratch DBs
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# NOTE: Cargo.lock IS committed (this workspace ships a binary).

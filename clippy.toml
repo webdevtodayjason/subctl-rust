@@ -1,0 +1,3 @@
+# Phase 0 scaffold — defaults only. Pedantic lint enablement deferred to
+# Phase 1; will live in `[workspace.lints.clippy]` once primitives land.
+msrv = "1.95.0"

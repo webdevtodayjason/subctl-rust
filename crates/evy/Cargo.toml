@@ -1,0 +1,32 @@
+[package]
+name = "evy"
+description = "Evy v4 daemon binary. Boots tokio, loads config, serves /health, wires the six library crates."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "evy"
+path = "src/main.rs"
+
+[dependencies]
+# Library primitives (all six wired in; not yet used by main.rs body)
+evy-core = { workspace = true }
+evy-policy = { workspace = true }
+evy-providers = { workspace = true }
+evy-scheduler = { workspace = true }
+evy-comms = { workspace = true }
+evy-memory = { workspace = true }
+
+# Runtime + observability
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Errors + config
+anyhow = { workspace = true }
+figment = { workspace = true }
+serde = { workspace = true }
