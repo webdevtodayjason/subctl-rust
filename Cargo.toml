@@ -51,6 +51,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 thiserror = "2"
 anyhow = "1"
 
+# Trait objects with async fns (`Box<dyn Provider>` dispatch)
+async-trait = "0.1"
+
+# Identifiers (Mandate / Worker)
+uuid = { version = "1", features = ["v4", "serde"] }
+
 # CLI (declared for future subctl CLI; not consumed by the daemon yet)
 clap = { version = "4", features = ["derive"] }
 
