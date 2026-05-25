@@ -224,18 +224,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "chrono"
-version = "0.4.44"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c673075a2e0e5f4a1dde27ce9dee1ea4558c7ffe648f576438a20ca1d2acc4b0"
-dependencies = [
- "iana-time-zone",
- "num-traits",
- "serde",
- "windows-link",
-]
-
-[[package]]
 name = "cmov"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -298,7 +286,7 @@ dependencies = [
  "chrono",
  "once_cell",
  "phf",
- "winnow",
+ "winnow 0.7.15",
 ]
 
 [[package]]
@@ -506,12 +494,14 @@ dependencies = [
 name = "evy-providers"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "evy-core",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
