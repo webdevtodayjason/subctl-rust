@@ -25,7 +25,24 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
 
+# ── Phase 3 Slice F: DeepSeek adapter ────────────────────────────────────
+# DeepSeek is API-direct (OpenAI-compatible HTTP). No tmux pane — the
+# adapter POSTs the chat-completions request directly. `rustls-tls` keeps
+# us off the OpenSSL footgun, same as evy-comms / evy-research.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+# `CancellationToken` for cooperative cancel of the in-flight HTTP future.
+# Bare (no `rt` feature) — we don't need `TaskTracker` here.
+tokio-util = "0.7"
+
 [dev-dependencies]
 # anyhow only in test scaffolding (`tests/real_claude_code_spawn.rs`);
 # library code returns the workspace `evy_core::Result` per house style.
 anyhow = { workspace = true }
+# Mock DeepSeek's HTTPS endpoint at the `reqwest` boundary so unit-style
+# integration tests never touch the real API.
+wiremock = "0.6"
+# Per-test scratch dir for the worker's output file. Cleaned on drop.
+tempfile = "3"

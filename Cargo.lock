@@ -854,13 +854,17 @@ dependencies = [
  "hex",
  "hmac",
  "rand 0.10.1",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]
