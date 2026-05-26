@@ -42,4 +42,20 @@ clap = { workspace = true }
 chrono = { version = "0.4", features = ["serde"] }
 
 [dev-dependencies]
+# ── Phase 2 Slice 2D — cutover testing ───────────────────────────────────
+# These dev-deps power the `tests/cutover/` harness. Each version pin
+# mirrors the choice already made in the consuming crate (evy-comms for
+# the HTTP / SSE / wiremock stack) so the dep graph stays tight.
 tempfile = "3"
+wiremock = "0.6"
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+    "stream",
+] }
+tokio-util = { version = "0.7", features = ["rt"] }
+serde_json = { workspace = true }
+futures-util = "0.3"
+eventsource-stream = "0.2"
+async-trait = { workspace = true }
+uuid = { workspace = true }
