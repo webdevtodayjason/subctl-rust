@@ -1,0 +1,64 @@
+[package]
+name = "evy-tui"
+description = "Evy v4 ratatui operator console. Read-only TUI client for the daemon's HTTP+SSE surface."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "evy_tui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "evy-tui"
+path = "src/main.rs"
+
+[dependencies]
+# Workspace primitives — the TUI consumes evy-core types over the HTTP
+# wire (WorkerId, ProviderKind, WorkerStatus, MandateId) so that the
+# JSON shapes emitted by evy-comms parse back into the same Rust types.
+evy-core = { workspace = true }
+
+# Terminal rendering. ratatui draws against a ratatui-managed Buffer;
+# crossterm provides the cross-platform terminal backend + key events.
+# `event-stream` lets us await key events via a futures::Stream and
+# multiplex with SSE / tick channels in a single `tokio::select!`.
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+
+# Async runtime + cancellation.
+tokio = { workspace = true }
+tokio-util = "0.7"
+
+# HTTP + SSE. The TUI does not import evy-comms (avoid pulling axum +
+# the Telegram bridge into a CLI binary); it consumes the wire format
+# directly. rustls-tls keeps us off the OpenSSL footgun.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+    "stream",
+] }
+eventsource-stream = "0.2"
+futures = "0.3"
+
+# Serialization + time.
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Errors + CLI + logging.
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+# Mock the daemon's HTTP surface at the reqwest boundary; no real
+# daemon required to verify the api module parses the documented JSON
+# shapes correctly.
+wiremock = "0.6"
