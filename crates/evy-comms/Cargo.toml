@@ -9,10 +9,41 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# Workspace primitives. evy-comms reads (does not mutate) the other
+# crates' public surface to serve workers, jobs, and policy state over
+# HTTP/SSE for the operator console.
 evy-core = { workspace = true }
-axum = { workspace = true }
+evy-policy = { workspace = true }
+evy-providers = { workspace = true }
+evy-scheduler = { workspace = true }
+
+# Async runtime + cancellation token for graceful shutdown.
 tokio = { workspace = true }
+tokio-util = { version = "0.7", features = ["rt"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+
+# HTTP layer (axum 0.8 / tower 0.5 / tower-http 0.6).
+axum = { workspace = true }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+http = "1"
+
+# Serialization + time + ids.
 serde = { workspace = true }
 serde_json = { workspace = true }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { workspace = true }
+
+# Streams used inside SSE handlers.
+futures = "0.3"
+
+# Errors + logging.
 thiserror = { workspace = true }
 tracing = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls", "json"] }
+eventsource-stream = "0.2"
+futures-util = "0.3"
