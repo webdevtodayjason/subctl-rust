@@ -16,3 +16,31 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+# ── Slice 2B2: Telegram bridge ───────────────────────────────────────────
+# Bot API is just HTTPS+JSON; reqwest keeps the dep surface minimal vs.
+# pulling a full Telegram crate. rustls-tls avoids the OpenSSL footgun.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+url = "2"
+
+# chrono is not in workspace deps; follow the per-crate pattern used by
+# evy-providers (no defaults, std + clock + serde).
+chrono = { version = "0.4", default-features = false, features = [
+    "std",
+    "clock",
+    "serde",
+] }
+
+# AskId/MandateId-style identifier surface.
+uuid = { workspace = true }
+
+# `run(shutdown: CancellationToken)` cooperative-cancel surface.
+tokio-util = "0.7"
+
+[dev-dependencies]
+# Mock the Telegram HTTPS endpoint at the `reqwest` boundary so tests
+# never touch the real Bot API.
+wiremock = "0.6"
