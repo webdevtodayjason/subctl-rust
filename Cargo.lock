@@ -596,8 +596,10 @@ name = "evy"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "clap",
+ "eventsource-stream",
  "evy-comms",
  "evy-core",
  "evy-memory",
@@ -605,11 +607,17 @@ dependencies = [
  "evy-providers",
  "evy-scheduler",
  "figment",
+ "futures-util",
+ "reqwest",
  "serde",
+ "serde_json",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+ "wiremock",
 ]
 
 [[package]]
