@@ -16,9 +16,12 @@
 //! - **Codex** — same shape as Claude, with `CODEX_HOME` for
 //!   per-account isolation and a trust-level override embedded in the
 //!   launch line.
-//! - **DeepSeek** — stub per ADR 0020's Phase-deferred items. Every
-//!   fallible method returns `Error::Provider { kind: DeepSeek, … }`
-//!   with the expected reason; no tmux, no network.
+//! - **DeepSeek** — API-direct adapter (Phase 3 Slice F). Dispatch is
+//!   a plain HTTPS `POST /v1/chat/completions` against DeepSeek's
+//!   OpenAI-compatible endpoint; the model's response text is the
+//!   worker's deliverable and lands in `<output_dir>/<worker_id>.md`.
+//!   No tmux pane, no CLI launch. First exercise of the `Provider`
+//!   trait's generality across worker shapes.
 //!
 //! # Lifetime
 //!
@@ -40,7 +43,7 @@ mod tmux;
 pub use claude_code::{ClaudeCodeProvider, ClaudeCodeWorker};
 pub use codex::{CodexProvider, CodexWorker};
 pub use config::{ClaudeCodeConfig, CodexConfig};
-pub use deepseek::DeepSeekProvider;
+pub use deepseek::{DeepSeekConfig, DeepSeekProvider, DeepSeekWorker};
 pub use hmac::{HmacKey, TrustMarker};
 
 #[cfg(test)]
