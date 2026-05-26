@@ -14,7 +14,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use evy::config::{
-    ClaudeCodeConfigToml, CodexConfigToml, PolicyConfig, ProvidersConfig, SchedulerConfig,
+    ClaudeCodeConfigToml, CodexConfigToml, CommsConfig, MemoryConfig, PolicyConfig,
+    ProvidersConfig, SchedulerConfig,
 };
 use evy::{run_smoke_test, Config};
 use evy_core::PolicyMode;
@@ -68,6 +69,12 @@ async fn phase1_smoke_test_runs_cron_job_and_exits_clean() -> anyhow::Result<()>
                 policy_mode: PolicyMode::Trusted,
             }),
         },
+        // Phase 3 Slice E added two config sections; the Phase 1 smoke
+        // path doesn't exercise either (it never spins HTTP / memory),
+        // so passing defaults keeps this test independent of the new
+        // wiring.
+        comms: CommsConfig::default(),
+        memory: MemoryConfig::default(),
     };
 
     let report = run_smoke_test(config).await?;

@@ -17,9 +17,8 @@ name = "evy"
 path = "src/main.rs"
 
 [dependencies]
-# Library primitives. Phase 1 wires evy-core / evy-policy / evy-providers /
-# evy-scheduler end-to-end; evy-comms and evy-memory remain declared but
-# unconsumed pending Phase 2 (see TODO markers in src/lib.rs).
+# Library primitives. Phase 3 Slice E wires the full stack — every
+# library crate is now composed inside `run_daemon`.
 evy-core = { workspace = true }
 evy-policy = { workspace = true }
 evy-providers = { workspace = true }
@@ -29,6 +28,7 @@ evy-memory = { workspace = true }
 
 # Runtime + observability
 tokio = { workspace = true }
+tokio-util = { version = "0.7", features = ["rt"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
@@ -36,7 +36,12 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 figment = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 clap = { workspace = true }
+
+# DaemonAppState implements the evy-comms AppState trait — async-trait
+# is needed for the impl.
+async-trait = { workspace = true }
 
 # Cron-aware timestamps for log lines + future "next fire" diagnostics.
 chrono = { version = "0.4", features = ["serde"] }

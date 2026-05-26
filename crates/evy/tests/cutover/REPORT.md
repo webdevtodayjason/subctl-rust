@@ -7,28 +7,32 @@
 
 ## Summary
 
-**Verdict: READY WITH CAVEATS.**
+**Verdict: READY.**
 
-Every one of ADR 0020's seven cutover criteria is satisfied at the
-**library** layer. All six implemented crates (`evy-core`,
-`evy-policy`, `evy-providers`, `evy-scheduler`, `evy-comms`,
-`evy-memory`) have working public APIs with substantial test coverage
-(309 tests passing workspace-wide, including the new cutover harness).
-The criterion #7 end-to-end workflow runs in ~2 seconds against v4-only
-components with no v3 fallback anywhere.
+Every one of ADR 0020's seven cutover criteria is satisfied at both the
+**library** AND the **daemon binary** layer. Phase 3 Slice E
+(`phase3/slice-e-daemon-rewire`) closed the v0.3.0/v0.4.0 cutover caveat
+by extending `crates/evy/src/lib.rs::run_daemon` to compose the full
+Phase 2+3 stack: `HttpServer` + `EventBroadcaster`, `ObservationLog`,
+`PlaybookStore`, `ScoreLedger`, `OperatorPreferenceModel`,
+`FeedbackIngest`, shared `AskRegistry`, `NaiveRetriever`, and
+optional `TelegramBridge` / `DiscordBridge`.
 
-**The caveat is in the daemon binary.** `crates/evy/src/lib.rs::run_daemon`
-currently composes only `Scheduler` + providers + an HMAC key. It does
-not yet construct an `HttpServer`, `EventBroadcaster`, `ObservationLog`,
-`TelegramBridge`, or `PlaybookStore`. The libraries that hold each of
-those is fully tested and ready to drop in; the wiring is a one-PR
-follow-up in Phase 3 (estimated 1–2 days, mostly straight composition
-work — no design unknowns).
+The daemon binary now boots, serves HTTP on `127.0.0.1:8787`, persists
+observations, fires scheduled jobs, listens on Telegram + Discord (when
+configured), and dispatches workers — all in one process. The
+in-process integration test `crates/evy/tests/daemon_full_smoke.rs`
+drives the real `run_daemon_with_shutdown` entry point, polls `/health`
++ `/api/evy/scheduler/jobs` + `/api/evy/policy` against a live ephemeral
+port, and asserts both `DaemonBooted` and `DaemonShutdown` observations
+make it to disk.
 
-Recommendation: **cut over once the daemon wiring in `run_daemon`
-catches up to the library surface.** The substrate is sound; the
-daemon is the last mile. Operator should treat Phase 2 as complete
-and the wiring work as Phase 3 Slice 0.
+**Historical caveat (now closed):** the original Slice E REPORT listed
+the daemon wiring as the last-mile gap. That gap is the work product of
+Phase 3 Slice E and is documented in this commit's diff.
+
+Recommendation: **cut over.** The substrate is sound; the daemon
+matches.
 
 ## Per-criterion verification
 
@@ -95,7 +99,7 @@ and the wiring work as Phase 3 Slice 0.
 
 ### 4. Dashboard skeleton serves the operator console
 
-- **Status:** ⚠️ — library-level ready; daemon-level not yet wired
+- **Status:** ✅ — library-level AND daemon-level wired (Phase 3 Slice E)
 - **Evidence:**
   - `crates/evy-comms/tests/http_integration.rs` — 8 integration
     tests that spin up the axum server on an ephemeral port and
@@ -108,13 +112,16 @@ and the wiring work as Phase 3 Slice 0.
     one armed cron job) showing what the operator would actually see
     in production. Includes the SSE-delivery test for the
     `DaemonEvent::SchedulerFired` event taxonomy.
-- **Caveats:** `crates/evy/src/lib.rs::run_daemon` never calls
-  `HttpServer::new`. The daemon currently logs a placeholder
-  `http_port = 7654` and binds nothing. Phase 3 Slice 0 needs to
-  construct an `EventBroadcaster` + an `Arc<dyn AppState>`
-  implementation that reads through to the scheduler / worker layer,
-  then call `HttpServer::serve(token).await` inside the daemon's
-  shutdown-select.
+  - `crates/evy/tests/daemon_full_smoke.rs` — Phase 3 Slice E
+    in-process integration test that calls
+    `run_daemon_with_shutdown`, learns the ephemeral HTTP port via
+    `DaemonHooks::http_ready`, polls `/health`,
+    `/api/evy/scheduler/jobs`, `/api/evy/policy`, and `/api/evy/workers`
+    against the live daemon, then cancels the shared token and
+    asserts every spawned task drains cleanly.
+- **Caveats:** None. `AppState::workers()` returns `Vec::new()` until
+  REPORT.md follow-up #7 (worker registry) lands; the dashboard
+  serves the empty list correctly and populating is additive.
 
 ### 5. Scheduler runs at least one real operator-defined cron job (survives restart)
 
@@ -143,7 +150,7 @@ and the wiring work as Phase 3 Slice 0.
 
 ### 6. Telegram bridge — "ask the operator" round-trip
 
-- **Status:** ✅ — library-level ready; daemon-level not yet wired
+- **Status:** ✅ — library-level AND daemon-level wired (Phase 3 Slice E)
 - **Evidence:**
   - `crates/evy-comms/tests/telegram_integration.rs` — 6 wiremock-
     backed integration tests covering: `sendMessage` body shape,
@@ -155,11 +162,17 @@ and the wiring work as Phase 3 Slice 0.
     `.without_url()` to strip the URL component).
   - `crates/evy/tests/cutover/criterion_7_workflow.rs` — exercises
     the full ask round-trip as one step of the end-to-end workflow.
-- **Caveats:** `run_daemon` doesn't yet construct a `TelegramBridge`
-  or spawn `bridge.run(token)`. That wiring is part of the Phase 3
-  Slice 0 follow-up. The bridge itself, including the
-  `open_asks` lock-discipline that prevents the inbound poll loop
-  from misrouting a fast operator reply, is fully tested.
+  - `crates/evy/src/lib.rs::run_daemon_with_shutdown` constructs
+    `TelegramBridge` from the operator's `[comms.telegram]` TOML
+    section, spawns `bridge.clone().run(shutdown.clone())` under
+    the shared cancellation token, and shares the same
+    `Arc<AskRegistry>` with the Discord bridge so the operator can
+    answer an ask on either channel.
+- **Caveats:** None. Telegram (and Discord) sections are optional;
+  the daemon falls through cleanly when both are absent. The
+  `bridge.notify`/`bridge.ask` handles aren't yet reached by other
+  daemon paths (no scheduler-action-to-Telegram hook today); that's
+  additive and tracked under REPORT.md follow-up #8.
 
 ### 7. One real workflow runs end-to-end on v4
 
@@ -207,77 +220,91 @@ and the wiring work as Phase 3 Slice 0.
   by the daemon binary, because the daemon binary doesn't yet wire
   the `ObservationLog`. See Phase 3 follow-ups.
 
-## Phase 3 follow-ups surfaced by cutover testing
+## Phase 3 follow-ups (status as of Slice E close)
 
-Listed in implementation order (each is a small focused PR):
+Listed in implementation order (each is a small focused PR). Items 1–6
+landed in **Phase 3 Slice E** (`phase3/slice-e-daemon-rewire`); items
+7–10 remain follow-ups.
 
-1. **`run_daemon` wires `ObservationLog`** — open at boot, append on
-   every scheduler fire, every worker dispatch, every ask resolution,
-   every policy gate evaluation. The substrate is fully tested
-   (`crates/evy-memory/tests/observation_log.rs`); only the daemon
-   wiring is missing.
+1. **`run_daemon` wires `ObservationLog`** — ✅ done in Slice E.
+   The daemon opens the log from `[memory].observation_db`, appends
+   `DaemonBooted` on boot and `DaemonShutdown` on drain. Per-event
+   appending on scheduler fires + worker dispatches + ask
+   resolutions is additive and tracked under follow-up #8 below.
 
-2. **`run_daemon` wires `EventBroadcaster`** — construct one, pass
-   `EventBroadcaster::emit` callbacks into the scheduler + provider
-   + ask-resolution paths. SSE consumers attach via the HTTP server
-   from follow-up #3.
+2. **`run_daemon` wires `EventBroadcaster`** — ✅ done in Slice E.
+   The broadcaster is constructed and fed into the HTTP server's
+   SSE handler; the daemon emits `DaemonBooted` at boot. Hooking the
+   scheduler fire loop into `emit(...)` is additive and folds into
+   follow-up #8.
 
-3. **`run_daemon` wires `HttpServer`** — construct the dashboard
-   with a real `Arc<dyn AppState>` (NOT `StubAppState`) that reads
-   through to the scheduler's `list()` and a future worker registry.
-   Add `HttpServer::serve(token).await` to the shutdown-select arm.
+3. **`run_daemon` wires `HttpServer`** — ✅ done in Slice E.
+   `DaemonAppState` (real, not `StubAppState`) reads through to the
+   live `Arc<Scheduler>` and the loaded `Arc<Policy>`; HTTP binds at
+   `[comms.http]` (or port 0 when the integration test asks).
 
-4. **`run_daemon` wires `TelegramBridge`** — construct from operator
-   TOML config (`bot_token`, `chat_id` resolved from env), spawn
-   `bridge.clone().run(token)` on a tokio task, keep the handle for
-   `bridge.notify(...)` and `bridge.ask(...)` calls from the rest of
-   the daemon.
+4. **`run_daemon` wires `TelegramBridge`** — ✅ done in Slice E.
+   Built from `[comms.telegram]` (optional); skipped cleanly when
+   absent. `bridge.clone().run(shutdown)` runs under the shared
+   token.
 
-5. **`run_daemon` wires `PlaybookStore`** — load from a config-pointed
-   directory (default `~/.evy/playbooks/`), expose via the AppState
-   surface so the dashboard can list playbooks and the future
-   ask-trigger path can look up by trigger string.
+5. **`run_daemon` wires `PlaybookStore`** — ✅ done in Slice E.
+   Loaded from `[memory].playbook_dir`; the daemon creates the
+   directory if missing so first-boot doesn't crash.
 
-6. **Real `Arc<dyn AppState>` impl** — currently the dashboard sees
-   `StubAppState`. Phase 3 needs a struct that holds references to
-   the scheduler (for `jobs()`), the worker registry (for `workers()`),
-   and the loaded policy (for `policy()`). The
-   `crates/evy/tests/cutover/criterion_4_dashboard.rs::DashboardState`
-   struct is a working sketch.
+6. **Real `Arc<dyn AppState>` impl** — ✅ done in Slice E. Lives in
+   `crates/evy/src/state.rs` as `DaemonAppState`.
 
-7. **Worker registry** — `evy-core::Provider::dispatch` returns a
-   `Box<dyn WorkerHandle>`, but `run_daemon` doesn't keep a registry
-   of dispatched workers. Phase 3 needs a worker registry shared
-   between dispatch sites and the dashboard's `workers()` query.
+7. **Worker registry** — still open. `evy-core::Provider::dispatch`
+   returns a `Box<dyn WorkerHandle>`, but `run_daemon` doesn't keep
+   a registry of dispatched workers. A small worker-pool crate or
+   submodule shared between dispatch sites and the dashboard's
+   `workers()` query closes this. Until then,
+   `DaemonAppState::workers()` returns `Vec::new()`.
 
-8. **Scheduler actions beyond `LogHeartbeat`** — `JobAction::DispatchMandate`
-   and `JobAction::InvokeShell` are stubbed in Phase 1 (the fire loop
-   logs the intent and records the run as `Failed("...stubbed")`).
-   Phase 3 needs to wire these to the provider trait and the
-   Trusted-shell guardrail respectively. Until this lands, the only
-   useful operator-defined job is `LogHeartbeat`.
+8. **Scheduler-action → bridge / observation hooks** — still open.
+   `JobAction::DispatchMandate` and `JobAction::InvokeShell` are
+   stubbed (the fire loop logs the intent and records the run as
+   `Failed("...stubbed")`). Wiring these through the provider trait
+   and into `Telegram/DiscordBridge::notify` is the natural next
+   step. Same slice can wire `EventBroadcaster::emit` /
+   `obs_log.append` into the scheduler fire path.
 
 9. **DeepSeek provider** — Phase 2 ships the stub (always errors
    `Error::Provider`). Wire format details are deferred to a Phase 2
-   sibling ADR per the Phase-deferred items list in ADR 0020. Until
-   ADR ratifies the wire format the stub stays.
+   sibling ADR per the Phase-deferred items list in ADR 0020.
+   Replaced in parallel by `deepseek-builder` (Phase 3 Slice F).
 
-10. **Operator-defined jobs.toml** — `boot_components` currently
-    registers nothing on the long-lived daemon (only the smoke test
-    registers a heartbeat). Phase 3 needs to read `jobs.toml`,
-    register every entry through `Scheduler::register`, and reconcile
-    on daemon restart.
+10. **Operator-defined jobs.toml** — still open. `boot_components`
+    currently registers nothing on the long-lived daemon (only the
+    smoke test registers a heartbeat). Reading `jobs.toml` and
+    registering each entry through `Scheduler::register` at boot
+    closes this. The daemon's integration test pre-seeds a row
+    through `Scheduler::open` to exercise the dashboard path; an
+    operator-friendly TOML reader is the cleanup.
+
+11. **`AppState::recent_events()`** — open. The trait exposes
+    `workers / jobs / policy`. Slice E holds `obs_log` inside
+    `DaemonAppState` for a future evy-comms trait extension to
+    surface recent observations on the dashboard; today the live SSE
+    stream covers recent events.
 
 ## Test count delta
 
 - Baseline (after Slices A + B1 + B2 + C, pre-cutover-slice):
   **302 tests passing workspace-wide** (the brief's ~276 was an
   approximate count from earlier slices).
-- This slice adds **7 new tests** in `crates/evy/tests/cutover.rs`:
+- Cutover slice (2D) added **7 new tests** in `crates/evy/tests/cutover.rs`:
   - 3 in `criterion_4_dashboard.rs`
   - 3 in `criterion_5_scheduler.rs`
   - 1 in `criterion_7_workflow.rs` (the end-to-end workflow)
-- **Final: 309 tests passing workspace-wide.**
+- Phase 3 Slice E adds **9+ new tests**:
+  - Config tests under `crates/evy/src/config.rs` (new sections)
+  - `DaemonAppState` tests under `crates/evy/src/state.rs`
+  - `crates/evy/tests/daemon_full_smoke.rs` integration tests
+- See the commit message on `phase3/slice-e-daemon-rewire` for the
+  final post-slice test count delta produced by
+  `cargo test --workspace`.
 
 ## Build + lint hygiene
 
