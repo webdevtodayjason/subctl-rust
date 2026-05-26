@@ -1,9 +1,13 @@
 //! `evy-comms` — multi-channel router for Evy v4.
 //!
-//! Phase 2 Slice 2B1 lands the **HTTP / SSE channel**: an axum-based
-//! HTTP server bound at `127.0.0.1:8787` (configurable) exposing the
-//! operator console's read-only surface plus a Server-Sent Events
-//! stream of [`DaemonEvent`]s for live dashboards.
+//! Phase 2 Slices 2B1 + 2B2 land the **HTTP / SSE** and **Telegram**
+//! channels. TUI and Discord come in Phase 3.
+//!
+//! # HTTP / SSE (2B1)
+//!
+//! axum-based HTTP server bound at `127.0.0.1:8787` (configurable)
+//! exposing the operator console's read-only surface plus a Server-Sent
+//! Events stream of [`DaemonEvent`]s for live dashboards.
 //!
 //! Routes ported from v3's `dashboard/server.ts` (the operator-facing
 //! subset only — fitness / engagement / pending-asks panels are
@@ -19,7 +23,13 @@
 //! | GET | `/api/evy/policy` | the loaded [`evy_policy::Policy`] as JSON |
 //! | GET | `/api/master/*` | URI-rewrite alias for `/api/evy/*` (legacy curl recipes) |
 //!
-//! # Quick start
+//! # Telegram (2B2)
+//!
+//! Telegram Bot API bridge with outbound notifications, inbound message
+//! dispatch, and an ask-round-trip lifecycle (Evy posts a question →
+//! operator replies → bridge resolves the pending ask).
+//!
+//! # Quick start (HTTP/SSE)
 //!
 //! ```no_run
 //! use std::sync::Arc;
@@ -40,20 +50,20 @@
 //! server.serve(shutdown).await?;
 //! # Ok(()) }
 //! ```
-//!
-//! # Other channels
-//!
-//! Telegram, TUI, and Discord are sibling modules added by separate
-//! workers in later slices. The router's channel-agnostic core surface
-//! lives in `evy-core::router` (Phase 2.5).
 
 #![warn(missing_docs)]
 
+// ── Slice 2B1: HTTP / SSE ────────────────────────────────────────────
 pub mod config;
 pub mod error;
 pub mod events;
 pub mod http;
 pub mod sse;
+
+// ── Slice 2B2: Telegram ──────────────────────────────────────────────
+pub mod ask;
+pub mod notification;
+pub mod telegram;
 
 // ── Public re-exports — the surface the daemon binary consumes ───────
 
@@ -62,3 +72,7 @@ pub use error::{CommsError, Result};
 pub use events::DaemonEvent;
 pub use http::{AppState, BoundHttpServer, HttpServer, JobSummary, StubAppState, WorkerSummary};
 pub use sse::EventBroadcaster;
+
+pub use ask::{Ask, AskId, AskRegistry};
+pub use notification::Notification;
+pub use telegram::{InboundMessage, TelegramBridge, TelegramConfig};

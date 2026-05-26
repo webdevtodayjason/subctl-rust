@@ -31,7 +31,11 @@ http = "1"
 # Serialization + time + ids.
 serde = { workspace = true }
 serde_json = { workspace = true }
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { version = "0.4", default-features = false, features = [
+    "std",
+    "clock",
+    "serde",
+] }
 uuid = { workspace = true }
 
 # Streams used inside SSE handlers.
@@ -42,8 +46,21 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 
+# ── Slice 2B2: Telegram bridge ───────────────────────────────────────────
+# Bot API is just HTTPS+JSON; reqwest keeps the dep surface minimal vs.
+# pulling a full Telegram crate. rustls-tls avoids the OpenSSL footgun.
+# `stream` feature serves the SSE integration tests as well.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+    "stream",
+] }
+url = "2"
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
-reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls", "json"] }
 eventsource-stream = "0.2"
 futures-util = "0.3"
+# Mock the Telegram HTTPS endpoint at the `reqwest` boundary so tests
+# never touch the real Bot API.
+wiremock = "0.6"
