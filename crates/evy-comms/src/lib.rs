@@ -65,6 +65,10 @@ pub mod ask;
 pub mod notification;
 pub mod telegram;
 
+// ── Phase 3 Slice B: Discord ─────────────────────────────────────────
+pub mod discord;
+pub mod discord_config;
+
 // ── Public re-exports — the surface the daemon binary consumes ───────
 
 pub use config::{HttpConfig, DEFAULT_HOST, DEFAULT_PORT};
@@ -76,3 +80,6 @@ pub use sse::EventBroadcaster;
 pub use ask::{Ask, AskId, AskRegistry};
 pub use notification::Notification;
 pub use telegram::{InboundMessage, TelegramBridge, TelegramConfig};
+
+pub use discord::{render_embed, DiscordBridge, Embed, EmbedField};
+pub use discord_config::DiscordConfig;

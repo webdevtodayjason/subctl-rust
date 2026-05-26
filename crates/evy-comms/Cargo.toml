@@ -57,6 +57,25 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 url = "2"
 
+# ── Phase 3 Slice B: Discord bridge ──────────────────────────────────────
+# Discord requires a stateful gateway (WebSocket) connection for inbound
+# events plus a REST surface for outbound messages + slash-command
+# registration. Rolling either by hand is ~500 lines we'd own forever;
+# `serenity` is the established library and matches the v3 master-bot
+# stack. rustls-only — no OpenSSL footgun, same as Telegram.
+#
+# We disable defaults and re-add only what the bridge needs (client +
+# gateway for the WS loop, model for typed Discord shapes, cache so
+# EventHandler callbacks see consistent state, rustls_backend for TLS).
+# `builder` and `http` ride in transitively via `client`.
+serenity = { version = "0.12", default-features = false, features = [
+    "client",
+    "gateway",
+    "model",
+    "cache",
+    "rustls_backend",
+] }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 eventsource-stream = "0.2"
