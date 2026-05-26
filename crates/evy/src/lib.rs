@@ -1,58 +1,102 @@
 //! Evy v4 daemon library entry point.
 //!
-//! Two entry points, both driven from the binary in `main.rs`:
+//! Three entry points, all driven from the binary in `main.rs`:
 //!
 //! - [`run_smoke_test`] (`--smoke` flag) — the Phase 1 regression check.
 //!   Boots scheduler + policy + providers, registers a heartbeat cron,
 //!   waits for one Succeeded run, then exits. Preserves Slice E
 //!   behaviour byte-for-byte so the smoke integration test in
 //!   `tests/smoke.rs` keeps passing.
-//! - [`run_daemon`] (default) — the Phase 2 long-lived process. Boots
-//!   the same wiring, mints a per-session HMAC key, attaches it to the
-//!   provider configs, and blocks on `tokio::signal::ctrl_c` / SIGTERM.
-//!   On signal: drains the scheduler, returns Ok. Exit code 0.
+//! - [`run_daemon`] (default) — the Phase 3 long-lived process. Composes
+//!   the FULL Phase 2+3 stack (HTTP/SSE server, observation log, playbook
+//!   store, scoring ledger, preference model, feedback ingest,
+//!   shared ask registry, naive retriever, optional Telegram + Discord
+//!   bridges) and blocks on `tokio::signal::ctrl_c` / SIGTERM.
+//! - [`run_daemon_with_shutdown`] — the testable seam. Takes a
+//!   [`tokio_util::sync::CancellationToken`] the caller controls and an
+//!   optional ready-signal channel; integration tests use this to learn
+//!   the ephemeral HTTP port and drive shutdown without sending signals.
 //!
-//! # Phase 2 wiring delta vs Phase 1
+//! # Phase 3 Slice E wiring delta vs Phase 2
 //!
-//! - Per-session [`HmacKey`] minted at boot. Threaded into every
-//!   provider config so every dispatched directive carries an ADR-0011
-//!   HMAC trust marker.
-//! - Graceful shutdown: `tokio::signal::ctrl_c` + (unix-only) SIGTERM
-//!   watchers race a never-completing future; first to fire triggers a
-//!   `scheduler.stop().await` and a clean return.
-//! - HTTP server bind port is logged in the "ready" line as a
-//!   placeholder. Slice 2B lands the real axum router.
+//! Slice E closes the v0.3.0/v0.4.0 cutover caveat (REPORT.md §4–§6):
+//! the daemon binary now composes the same library stack the cutover
+//! tests exercise. Concretely, [`run_daemon_with_shutdown`] does, in order:
 //!
-//! # TODO markers carried forward to later slices
+//! 1. Open the scheduler + load policy + build provider trait-objects
+//!    with HMAC-stamped configs (unchanged from Phase 2).
+//! 2. Open the memory substrate: [`evy_memory::ObservationLog`],
+//!    [`evy_memory::PlaybookStore`], [`evy_memory::ScoreLedger`],
+//!    [`evy_memory::OperatorPreferenceModel`],
+//!    [`evy_memory::FeedbackIngest`]. Create the playbook dir if
+//!    missing so first-boot doesn't crash on an absent `playbooks/`.
+//! 3. Open the comms substrate: [`evy_comms::EventBroadcaster`],
+//!    `Arc<AskRegistry>` (shared across every bridge), and the
+//!    [`evy_comms::HttpServer`] bound to a `DaemonAppState` that reads
+//!    through to the live scheduler + policy + obs_log.
+//! 4. Optionally construct + spawn [`evy_comms::TelegramBridge`] and/or
+//!    [`evy_comms::DiscordBridge`] when their config sections are
+//!    present.
+//! 5. Build [`evy_memory::NaiveRetriever`] wired to every memory layer
+//!    (the daemon hands an `Arc<NaiveRetriever>` to future surfaces;
+//!    see `daemon_state()` for the accessor).
+//! 6. Emit a `DaemonBooted` event on SSE and append a `DaemonBooted`
+//!    observation row.
+//! 7. `scheduler.start()`, spawn HTTP / Telegram / Discord under the
+//!    shared shutdown token.
+//! 8. Await shutdown (either operator-provided token cancellation, or
+//!    in `run_daemon` the first SIGTERM / Ctrl-C).
+//! 9. Drain everything cleanly: `scheduler.stop()`, cancel the shared
+//!    token (which lets HTTP/Telegram/Discord exit on the next select),
+//!    `await` every spawned handle, append `DaemonShutdown` observation.
 //!
-//! - Slice 2B: wire `evy-comms` HTTP router (axum) + `/health` + `/metrics`.
-//! - Slice 2B: replace the smoke-test cron with a real operator schedule
-//!   sourced from a `jobs.toml` file.
-//! - Slice 2C: snapshot dispatched mandates into `evy-memory`.
-//! - Phase 3: persist the per-session `HmacKey` under
-//!   `~/.config/subctl/`, with rotation + worker re-key support.
+//! # What's deliberately NOT here
+//!
+//! - **Worker registry.** `AppState::workers()` returns `Vec::new()`
+//!   until a dedicated worker pool ships. The dashboard already serves
+//!   the empty list correctly; populating is additive.
+//! - **DeepSeek dispatch.** The stub returns `NotImplemented` at
+//!   dispatch — `deepseek-builder` is replacing it in a parallel slice.
+//! - **Thinking-partner surface.** `thinking-partner-builder` ships a
+//!   new crate in parallel; a follow-up slice wires it.
+//! - **`recent_events` on `AppState`.** The trait has
+//!   `workers / jobs / policy`. Adding a recent-events method would
+//!   need an evy-comms extension; this slice keeps the trait intact and
+//!   relies on the live SSE stream for recent events instead.
 
 #![warn(missing_docs)]
 
 pub mod config;
+pub mod state;
 
+use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use evy_comms::{
+    AskRegistry, DaemonEvent, DiscordBridge, EventBroadcaster, HttpServer, TelegramBridge,
+};
 use evy_core::Provider;
+use evy_memory::{
+    observation::ObservationKind, FeedbackIngest, NaiveRetriever, Observation, ObservationLog,
+    OperatorPreferenceModel, PlaybookStore, ScoreLedger,
+};
 use evy_policy::{check_command_simple, load_policy, Mode};
 use evy_providers::{ClaudeCodeProvider, CodexProvider, DeepSeekProvider, HmacKey};
 use evy_scheduler::{Job, JobAction, JobId, RunOutcome, Scheduler};
 use tokio::signal;
+use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
 pub use config::Config;
+pub use state::DaemonAppState;
 
-/// Placeholder port for the future HTTP control surface. Slice 2B will
-/// replace this with a real configurable bind address sourced from
-/// [`Config`].
-const PLACEHOLDER_HTTP_PORT: u16 = 7654;
+/// Workspace version reported on `/health`, `/api/version`, and the
+/// `DaemonBooted` SSE event.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Initialise the global tracing subscriber.
 ///
@@ -61,7 +105,9 @@ const PLACEHOLDER_HTTP_PORT: u16 = 7654;
 /// global subscriber `try_init` swallows the error).
 pub fn init_tracing() {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new("evy=info,evy_scheduler=info,evy_policy=info,evy_providers=info")
+        EnvFilter::new(
+            "evy=info,evy_scheduler=info,evy_policy=info,evy_providers=info,evy_comms=info",
+        )
     });
     // try_init lets repeated calls (binary + tests in-process) coexist.
     let _ = tracing_subscriber::fmt()
@@ -88,14 +134,14 @@ pub struct SmokeReport {
 // ─── shared boot ────────────────────────────────────────────────────────
 
 /// Open the scheduler, load policy, build provider trait-objects. Used
-/// by both `run_smoke_test` and `run_daemon`.
+/// by both `run_smoke_test` and the daemon entry points.
 ///
 /// Mints a fresh [`HmacKey`] and stamps it into every provider config so
 /// downstream dispatch wraps every directive in the ADR-0011 trust
 /// marker. The key is borrowed by the configs (each `Provider` keeps its
 /// own clone via `ClaudeCodeConfig::hmac_key`); the live key sits in the
 /// returned tuple so the caller can also pass it to future surfaces
-/// (e.g. the verifier endpoint in 2B).
+/// (e.g. the verifier endpoint).
 async fn boot_components(config: &Config) -> Result<(Scheduler, Vec<Box<dyn Provider>>, HmacKey)> {
     let scheduler = Scheduler::open(&config.scheduler.db_path)
         .await
@@ -169,7 +215,7 @@ fn load_providers(config: &Config, session_key: &HmacKey) -> Result<Vec<Box<dyn 
 ///
 /// Replaces what was [`run_daemon`] in Slice E. The behaviour is
 /// unchanged byte-for-byte — `tests/smoke.rs` drives this directly to
-/// guard against Phase 2 regressions.
+/// guard against Phase 2+3 regressions.
 ///
 /// # Errors
 /// Returns `Err` if the scheduler db cannot be opened, the policy file
@@ -223,49 +269,284 @@ pub async fn run_smoke_test(config: Config) -> Result<SmokeReport> {
     })
 }
 
-// ─── Phase 2 long-lived daemon ─────────────────────────────────────────
+// ─── Phase 3 long-lived daemon ─────────────────────────────────────────
+
+/// Optional in-process hooks the testable [`run_daemon_with_shutdown`]
+/// surfaces back to the caller. Production callers (`run_daemon`) pass
+/// [`DaemonHooks::default`]; integration tests pass a oneshot to learn
+/// the ephemeral HTTP socket addr after `bind` succeeds.
+#[derive(Default)]
+pub struct DaemonHooks {
+    /// Sent the actual bound HTTP `SocketAddr` once `HttpServer::bind`
+    /// succeeds (which happens before `serve` is awaited). Tests that
+    /// configure `port = 0` need this to learn the ephemeral port the
+    /// kernel assigned. Sender is `take`n on use; subsequent test asserts
+    /// see `None` if they peek.
+    pub http_ready: Option<oneshot::Sender<SocketAddr>>,
+}
 
 /// Boot the daemon and block until SIGTERM or Ctrl-C, then drain cleanly.
 ///
-/// # Lifecycle
-///
-/// 1. [`boot_components`] opens the scheduler, loads policy, builds
-///    provider trait-objects with HMAC-stamped configs.
-/// 2. `scheduler.start()` boots the fire loop. (Slice 2A registers no
-///    operator-supplied cron jobs; Slice 2B introduces `jobs.toml`.)
-/// 3. A "ready" log line announces which providers are configured and
-///    the placeholder HTTP port future surfaces will bind.
-/// 4. The function awaits the first of: `tokio::signal::ctrl_c()`,
-///    SIGTERM (unix only). When either fires, the function calls
-///    `scheduler.stop().await` and returns.
+/// Thin wrapper around [`run_daemon_with_shutdown`] that mints a
+/// [`CancellationToken`], arms `tokio::signal::ctrl_c` + (on unix)
+/// SIGTERM watchers on it, and passes empty [`DaemonHooks`].
 ///
 /// # Errors
 /// Returns `Err` on boot failure or if scheduler shutdown fails.
-/// Signal-watching itself is infallible (modulo `tokio::signal::unix`
-/// errors, which only happen on broken kernels).
 pub async fn run_daemon(config: Config) -> Result<()> {
-    tracing::info!(?config, "evy v4 booting (Phase 2 daemon)");
+    let shutdown = CancellationToken::new();
+    let signal_token = shutdown.clone();
+    // Spawn the signal watcher in the background. It races SIGTERM and
+    // Ctrl-C; whichever fires first cancels the shared token, which the
+    // daemon's main select arm picks up and drains on.
+    tokio::spawn(async move {
+        let kind = wait_for_shutdown_signal().await;
+        tracing::info!(?kind, "shutdown signal received; cancelling shared token");
+        signal_token.cancel();
+    });
+    run_daemon_with_shutdown(config, shutdown, DaemonHooks::default()).await
+}
+
+/// Boot the daemon, compose every Phase 2+3 component, and run until
+/// `shutdown` is cancelled.
+///
+/// This is the testable seam. [`run_daemon`] is a wrapper that arms a
+/// signal-driven cancel; integration tests cancel the token directly.
+///
+/// # Errors
+/// Returns `Err` on boot failure (db open, policy parse, http bind,
+/// playbook dir create, memory open) or if scheduler shutdown fails.
+#[allow(clippy::too_many_lines)] // composition function — extracting helpers
+                                 // hurts readability more than it helps.
+pub async fn run_daemon_with_shutdown(
+    config: Config,
+    shutdown: CancellationToken,
+    mut hooks: DaemonHooks,
+) -> Result<()> {
+    tracing::info!(?config, "evy v4 booting (Phase 3 daemon)");
+
+    // ── 1. Existing pieces: scheduler + providers + policy + HMAC ────
     let (scheduler, providers, _session_key) = boot_components(&config).await?;
+    let scheduler = Arc::new(scheduler);
+    // Reload the policy for sharing — `boot_components` consumes it via
+    // the inner `load_policy` call but doesn't return it. Reading the
+    // file again is cheap (it's the operator's policy.toml) and keeps
+    // the boot-time validation path exercised once.
+    let policy = Arc::new(
+        load_policy(&config.policy.path)
+            .with_context(|| format!("re-loading policy from {}", config.policy.path.display()))?,
+    );
+
+    // ── 2. Memory substrate ──────────────────────────────────────────
+    // Create the playbook dir if missing so first-boot on a clean
+    // operator install doesn't crash. The store still rejects file-
+    // shaped paths (the operator gets a clear error).
+    if !config.memory.playbook_dir.exists() {
+        std::fs::create_dir_all(&config.memory.playbook_dir).with_context(|| {
+            format!(
+                "creating playbook dir at {}",
+                config.memory.playbook_dir.display()
+            )
+        })?;
+        tracing::info!(
+            dir = %config.memory.playbook_dir.display(),
+            "playbook dir did not exist; created"
+        );
+    }
+
+    let obs_log = Arc::new(
+        ObservationLog::open(&config.memory.observation_db)
+            .await
+            .with_context(|| {
+                format!(
+                    "opening observation log at {}",
+                    config.memory.observation_db.display()
+                )
+            })?,
+    );
+    let playbooks = Arc::new(
+        PlaybookStore::load(&config.memory.playbook_dir).with_context(|| {
+            format!(
+                "loading playbook store from {}",
+                config.memory.playbook_dir.display()
+            )
+        })?,
+    );
+    let scoring = Arc::new(
+        ScoreLedger::open(&config.memory.score_db)
+            .await
+            .with_context(|| {
+                format!(
+                    "opening score ledger at {}",
+                    config.memory.score_db.display()
+                )
+            })?,
+    );
+    let preferences = Arc::new(
+        OperatorPreferenceModel::open(&config.memory.preferences_db)
+            .await
+            .with_context(|| {
+                format!(
+                    "opening preference model at {}",
+                    config.memory.preferences_db.display()
+                )
+            })?,
+    );
+    // Feedback ingest shares the scoring db (migrator is idempotent —
+    // both `feedback` and `worker_effectiveness_scores` live under the
+    // same evy-memory migrations set). Folding into one file keeps the
+    // operator's `[memory]` table short.
+    let feedback = Arc::new(
+        FeedbackIngest::open(
+            &config.memory.score_db,
+            obs_log.clone(),
+            scoring.clone(),
+            preferences.clone(),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "opening feedback ingest at {}",
+                config.memory.score_db.display()
+            )
+        })?,
+    );
+
+    // Naive retriever wired to every layer. Held in an Arc so future
+    // surfaces (TUI / dashboard /api/evy/retrieve / Telegram /retrieve)
+    // can share without an additional rebuild.
+    let _retriever = Arc::new(
+        NaiveRetriever::new(obs_log.clone(), None, playbooks.clone())
+            .with_scoring(scoring.clone())
+            .with_preferences(preferences.clone())
+            .with_feedback(feedback.clone()),
+    );
+    // TODO: Phase 3+ — once a thinking-partner crate lands, an
+    // Option<Arc<...>> here lets the daemon hand the retriever to it.
+
+    // ── 3. Comms substrate ───────────────────────────────────────────
+    let event_broadcaster = EventBroadcaster::default();
+    let ask_registry = Arc::new(AskRegistry::new());
+
+    let app_state = Arc::new(DaemonAppState::new(
+        scheduler.clone(),
+        policy.clone(),
+        obs_log.clone(),
+    ));
+    let http_server = HttpServer::new(
+        config.comms.http.clone().into(),
+        event_broadcaster.clone(),
+        app_state.clone(),
+    );
+    let bound = http_server
+        .bind()
+        .await
+        .context("binding evy-comms HTTP server")?;
+    let http_addr = bound.local_addr();
+    tracing::info!(addr = %http_addr, "HTTP server bound");
+    if let Some(tx) = hooks.http_ready.take() {
+        // Test hook — surface the bound port. Caller-dropped receiver
+        // is fine; the daemon proceeds either way.
+        let _ = tx.send(http_addr);
+    }
+
+    // Optional Telegram bridge. `bridge.clone().run(token)` is the
+    // long-lived loop; the original handle stays for `notify` / `ask`.
+    let telegram_bridge = config.comms.telegram.clone().map(|tg| {
+        let bridge = TelegramBridge::new(tg.into(), ask_registry.clone());
+        tracing::info!("telegram bridge configured");
+        bridge
+    });
+
+    // Optional Discord bridge. Same shape as telegram — `run(token)`
+    // long-lived, `notify`/`ask` on the original handle.
+    let discord_bridge = config.comms.discord.clone().map(|dc| {
+        let bridge = DiscordBridge::new(dc.into(), ask_registry.clone());
+        tracing::info!("discord bridge configured");
+        bridge
+    });
+
+    // ── 4. Boot-time event + observation ─────────────────────────────
+    let provider_kinds: Vec<_> = providers.iter().map(|p| p.kind()).collect();
+    let booted_event = DaemonEvent::DaemonBooted {
+        version: VERSION.to_owned(),
+        providers: provider_kinds.clone(),
+    };
+    event_broadcaster.emit(booted_event);
+    obs_log
+        .append(Observation::new(ObservationKind::DaemonBooted {
+            version: VERSION.to_owned(),
+        }))
+        .await
+        .context("appending DaemonBooted observation")?;
+
+    // ── 5. Start scheduler + spawn long-lived tasks ──────────────────
     scheduler
         .start()
         .await
         .context("starting scheduler fire loop")?;
 
-    let provider_kinds: Vec<_> = providers.iter().map(|p| p.kind()).collect();
+    let mut handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+
+    // HTTP server runs under the shared shutdown token.
+    {
+        let shutdown_for_http = shutdown.clone();
+        let handle = tokio::spawn(async move {
+            if let Err(e) = bound.serve(shutdown_for_http).await {
+                tracing::error!(error = %e, "HTTP server exited with error");
+            }
+        });
+        handles.push(handle);
+    }
+
+    if let Some(bridge) = telegram_bridge {
+        let shutdown_for_tg = shutdown.clone();
+        let handle = tokio::spawn(async move {
+            if let Err(e) = bridge.run(shutdown_for_tg).await {
+                tracing::error!(error = %e, "telegram bridge exited with error");
+            }
+        });
+        handles.push(handle);
+    }
+
+    if let Some(bridge) = discord_bridge {
+        let shutdown_for_dc = shutdown.clone();
+        let handle = tokio::spawn(async move {
+            if let Err(e) = bridge.run(shutdown_for_dc).await {
+                tracing::error!(error = %e, "discord bridge exited with error");
+            }
+        });
+        handles.push(handle);
+    }
+
     tracing::info!(
+        version = VERSION,
         providers = ?provider_kinds,
-        http_port = PLACEHOLDER_HTTP_PORT,
-        "evy v4 daemon ready — awaiting SIGTERM / Ctrl-C",
+        http_addr = %http_addr,
+        playbooks = playbooks.count(),
+        "evy v4 daemon ready"
     );
 
-    let signal_kind = wait_for_shutdown_signal().await;
-    tracing::info!(?signal_kind, "shutdown signal received; draining");
+    // ── 6. Await shutdown ────────────────────────────────────────────
+    shutdown.cancelled().await;
+    tracing::info!("shutdown token fired; draining");
 
+    // ── 7. Graceful drain ────────────────────────────────────────────
     if let Err(e) = scheduler.stop().await {
         tracing::error!(error = %e, "scheduler shutdown failed; continuing exit");
-        // Surface the error to the caller so the process exits non-zero
-        // on a dirty shutdown — operator can investigate the failure.
-        return Err(anyhow::Error::from(e).context("scheduler.stop during graceful shutdown"));
+    }
+    for handle in handles {
+        if let Err(e) = handle.await {
+            tracing::warn!(error = %e, "spawned task join error");
+        }
+    }
+    if let Err(e) = obs_log
+        .append(Observation::new(ObservationKind::DaemonShutdown {
+            reason: "shutdown_token_cancelled".to_owned(),
+        }))
+        .await
+    {
+        tracing::warn!(error = %e, "appending DaemonShutdown observation failed");
     }
     tracing::info!("evy v4 daemon stopped cleanly");
     Ok(())
@@ -376,5 +657,11 @@ mod tests {
         let s_term = format!("{:?}", ShutdownSignal::Terminate);
         assert_eq!(s_ctrlc, "CtrlC");
         assert_eq!(s_term, "Terminate");
+    }
+
+    #[test]
+    fn daemon_hooks_default_carries_no_sender() {
+        let h = DaemonHooks::default();
+        assert!(h.http_ready.is_none());
     }
 }

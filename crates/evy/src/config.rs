@@ -18,6 +18,19 @@
 //! as friction point #2 in the Slice E report — Phase 2 could reconcile
 //! by changing the provider crate's field names, but that's a public-API
 //! break we're not ready to make at Slice E close.
+//!
+//! # Phase 3 Slice E — comms + memory sections
+//!
+//! `[comms.http]`, `[comms.telegram]`, `[comms.discord]`, and `[memory]`
+//! land alongside the existing provider config. Each of the four is
+//! `#[serde(default)]` so the Slice E smoke test (which hand-constructs a
+//! `Config` with only the original three sections) keeps compiling, and
+//! so a daemon installation with no telegram/discord tokens falls through
+//! without an "unset key" parse error. `[memory]` itself carries
+//! production-shaped defaults (sqlite files under `/tmp/evy-*.db`,
+//! playbooks under `./playbooks/`) so a fresh operator who runs `evy`
+//! without authoring a TOML at all still boots — the daemon
+//! [`crate::run_daemon`] creates the playbook directory if missing.
 
 use std::path::PathBuf;
 
@@ -40,6 +53,17 @@ pub struct Config {
     /// Per-provider configuration. Both providers are optional; at
     /// least one must be set or [`crate::run_daemon`] will refuse to boot.
     pub providers: ProvidersConfig,
+    /// Multi-channel router configuration: HTTP/SSE plus optional
+    /// Telegram and Discord bridges. Defaulted so an operator config
+    /// that omits the section still boots a working HTTP surface on
+    /// `127.0.0.1:8787`.
+    #[serde(default)]
+    pub comms: CommsConfig,
+    /// Learning-loop substrate configuration: observation log, playbook
+    /// store, scoring ledger, preference model, optional claude-mem db.
+    /// Defaulted so a fresh install boots without a TOML.
+    #[serde(default)]
+    pub memory: MemoryConfig,
 }
 
 /// `[scheduler]` table.
@@ -131,6 +155,166 @@ impl From<CodexConfigToml> for CodexConfig {
     }
 }
 
+// ─── Phase 3 Slice E — comms ──────────────────────────────────────────
+
+/// `[comms]` table — wraps the three channel-specific configs.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct CommsConfig {
+    /// `[comms.http]` — HTTP/SSE dashboard bind config.
+    #[serde(default)]
+    pub http: HttpSectionConfig,
+    /// `[comms.telegram]` — optional; daemon skips spawning the bridge
+    /// when absent.
+    #[serde(default)]
+    pub telegram: Option<TelegramSectionConfig>,
+    /// `[comms.discord]` — optional; daemon skips spawning the bridge
+    /// when absent.
+    #[serde(default)]
+    pub discord: Option<DiscordSectionConfig>,
+}
+
+/// On-disk shape for `[comms.http]`. Maps to [`evy_comms::HttpConfig`].
+///
+/// Defaults bind loopback on the v3 dashboard port (`127.0.0.1:8787`)
+/// so existing curl recipes keep working out of the box.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HttpSectionConfig {
+    /// Bind host. Default `"127.0.0.1"`.
+    pub host: String,
+    /// Bind port. Default `8787` (v3 dashboard parity).
+    pub port: u16,
+    /// CORS allowlist. Default empty (CORS disabled).
+    #[serde(default)]
+    pub allow_origins: Vec<String>,
+}
+
+impl Default for HttpSectionConfig {
+    fn default() -> Self {
+        Self {
+            host: evy_comms::DEFAULT_HOST.to_owned(),
+            port: evy_comms::DEFAULT_PORT,
+            allow_origins: Vec::new(),
+        }
+    }
+}
+
+impl From<HttpSectionConfig> for evy_comms::HttpConfig {
+    fn from(s: HttpSectionConfig) -> Self {
+        Self {
+            host: s.host,
+            port: s.port,
+            allow_origins: s.allow_origins,
+        }
+    }
+}
+
+/// On-disk shape for `[comms.telegram]`. Maps to
+/// [`evy_comms::TelegramConfig`].
+///
+/// Operators source `bot_token` from `@BotFather` and `chat_id` from
+/// `/getUpdates` against the bot after sending it a message; both are
+/// typically captured under env `TELEGRAM_BOT_TOKEN` /
+/// `TELEGRAM_CHAT_ID` and overridden via figment env layering.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TelegramSectionConfig {
+    /// Bot API token (`@BotFather`). Never logged.
+    pub bot_token: String,
+    /// Authorized chat id. Inbound messages from other chats are dropped.
+    pub chat_id: i64,
+    /// Inbound poll interval, milliseconds. Default 1000.
+    #[serde(default = "default_poll_interval_ms")]
+    pub poll_interval_ms: u64,
+    /// `timeout=` query argument to `getUpdates`, milliseconds.
+    /// Default 25000.
+    #[serde(default = "default_long_poll_timeout_ms")]
+    pub long_poll_timeout_ms: u64,
+}
+
+const fn default_poll_interval_ms() -> u64 {
+    1000
+}
+
+const fn default_long_poll_timeout_ms() -> u64 {
+    25_000
+}
+
+impl From<TelegramSectionConfig> for evy_comms::TelegramConfig {
+    fn from(s: TelegramSectionConfig) -> Self {
+        let mut cfg = Self::new(s.bot_token, s.chat_id);
+        cfg.poll_interval = std::time::Duration::from_millis(s.poll_interval_ms);
+        cfg.long_poll_timeout = std::time::Duration::from_millis(s.long_poll_timeout_ms);
+        cfg
+    }
+}
+
+/// On-disk shape for `[comms.discord]`. Maps to
+/// [`evy_comms::DiscordConfig`].
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DiscordSectionConfig {
+    /// Bot API token. Never logged.
+    pub bot_token: String,
+    /// Authorized channel id (Discord snowflake).
+    pub channel_id: u64,
+    /// Bot's application id (Discord snowflake). Required for slash-
+    /// command registration.
+    pub application_id: u64,
+}
+
+impl From<DiscordSectionConfig> for evy_comms::DiscordConfig {
+    fn from(s: DiscordSectionConfig) -> Self {
+        Self::new(s.bot_token, s.channel_id, s.application_id)
+    }
+}
+
+// ─── Phase 3 Slice E — memory ─────────────────────────────────────────
+
+/// `[memory]` table — paths the learning-loop substrate opens.
+///
+/// All four sqlite files may safely point at the *same* path: the
+/// evy-memory migrator is idempotent across stores and each table has a
+/// distinct name. We default to four separate `/tmp/evy-*.db` files so
+/// a fresh install boots without any operator config, AND so an
+/// operator who wants to wipe one substrate (`rm /tmp/evy-scores.db`)
+/// doesn't accidentally take out the observation log.
+///
+/// Feedback rows live in `score_db` — the brief enumerated four db
+/// paths and `FeedbackIngest::open` accepts any of them (migrations
+/// are workspace-shared). Reusing `score_db` keeps the config table
+/// short while still letting operators isolate by tearing down that
+/// one file.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MemoryConfig {
+    /// sqlite path the observation log opens. Default
+    /// `/tmp/evy-observations.db`.
+    pub observation_db: PathBuf,
+    /// Directory of operator-authored `.md` playbooks. Created if
+    /// missing at daemon boot. Default `playbooks/`.
+    pub playbook_dir: PathBuf,
+    /// sqlite path the scoring ledger + feedback ingest open. Default
+    /// `/tmp/evy-scores.db`.
+    pub score_db: PathBuf,
+    /// sqlite path the operator-preference model opens. Default
+    /// `/tmp/evy-preferences.db`.
+    pub preferences_db: PathBuf,
+    /// Optional path to the operator's claude-mem sqlite db (read-only
+    /// consumer). `None` = retrieval falls open without cross-session
+    /// priors.
+    #[serde(default)]
+    pub claude_mem_db: Option<PathBuf>,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            observation_db: PathBuf::from("/tmp/evy-observations.db"),
+            playbook_dir: PathBuf::from("playbooks"),
+            score_db: PathBuf::from("/tmp/evy-scores.db"),
+            preferences_db: PathBuf::from("/tmp/evy-preferences.db"),
+            claude_mem_db: None,
+        }
+    }
+}
+
 impl Config {
     /// Resolve from the binary's default sources: `$SUBCTL_EVY_CONFIG`
     /// falling back to `./config/evy.toml`, plus env override.
@@ -193,6 +377,14 @@ policy_mode = "Trusted"
         assert_eq!(cfg.scheduler.db_path, PathBuf::from("/tmp/evy.db"));
         assert!(cfg.providers.claude_code.is_some());
         assert!(cfg.providers.codex.is_some());
+        // Comms + memory absent on disk — defaults must fill in.
+        assert_eq!(cfg.comms.http.port, evy_comms::DEFAULT_PORT);
+        assert!(cfg.comms.telegram.is_none());
+        assert!(cfg.comms.discord.is_none());
+        assert_eq!(
+            cfg.memory.observation_db,
+            PathBuf::from("/tmp/evy-observations.db")
+        );
     }
 
     #[test]
@@ -238,5 +430,128 @@ path = "/tmp/policy.toml"
         let c: CodexConfig = t.into();
         assert_eq!(c.codex_home, PathBuf::from("/h"));
         assert_eq!(c.model.as_deref(), Some("gpt-5.5"));
+    }
+
+    #[test]
+    fn comms_section_parses_with_telegram_and_discord() {
+        let f = write_toml(
+            r#"
+[scheduler]
+db_path = "/tmp/evy.db"
+
+[policy]
+path = "/tmp/policy.toml"
+
+[providers]
+
+[comms.http]
+host = "127.0.0.1"
+port = 9999
+allow_origins = ["http://localhost:3000"]
+
+[comms.telegram]
+bot_token = "test-token"
+chat_id = -1001234567890
+poll_interval_ms = 500
+long_poll_timeout_ms = 30000
+
+[comms.discord]
+bot_token = "discord-token"
+channel_id = 111
+application_id = 222
+"#,
+        );
+        let cfg = Config::load_from(f.path()).expect("parse");
+        assert_eq!(cfg.comms.http.port, 9999);
+        let tg = cfg.comms.telegram.expect("telegram present");
+        assert_eq!(tg.chat_id, -1001234567890);
+        assert_eq!(tg.poll_interval_ms, 500);
+        let dc = cfg.comms.discord.expect("discord present");
+        assert_eq!(dc.application_id, 222);
+    }
+
+    #[test]
+    fn memory_section_parses_and_overrides_defaults() {
+        let f = write_toml(
+            r#"
+[scheduler]
+db_path = "/tmp/evy.db"
+
+[policy]
+path = "/tmp/policy.toml"
+
+[providers]
+
+[memory]
+observation_db = "/tmp/custom-obs.db"
+playbook_dir = "/tmp/custom-playbooks"
+score_db = "/tmp/custom-scores.db"
+preferences_db = "/tmp/custom-prefs.db"
+claude_mem_db = "/Users/sem/.claude-mem/db.sqlite"
+"#,
+        );
+        let cfg = Config::load_from(f.path()).expect("parse");
+        assert_eq!(
+            cfg.memory.observation_db,
+            PathBuf::from("/tmp/custom-obs.db")
+        );
+        assert_eq!(
+            cfg.memory.playbook_dir,
+            PathBuf::from("/tmp/custom-playbooks")
+        );
+        assert_eq!(
+            cfg.memory.claude_mem_db,
+            Some(PathBuf::from("/Users/sem/.claude-mem/db.sqlite"))
+        );
+    }
+
+    #[test]
+    fn http_section_into_evy_comms_config() {
+        let s = HttpSectionConfig {
+            host: "0.0.0.0".into(),
+            port: 7000,
+            allow_origins: vec!["http://x".into()],
+        };
+        let c: evy_comms::HttpConfig = s.into();
+        assert_eq!(c.host, "0.0.0.0");
+        assert_eq!(c.port, 7000);
+        assert_eq!(c.allow_origins, vec!["http://x".to_owned()]);
+    }
+
+    #[test]
+    fn telegram_section_into_evy_comms_config() {
+        let s = TelegramSectionConfig {
+            bot_token: "tok".into(),
+            chat_id: 42,
+            poll_interval_ms: 100,
+            long_poll_timeout_ms: 200,
+        };
+        let c: evy_comms::TelegramConfig = s.into();
+        assert_eq!(c.bot_token, "tok");
+        assert_eq!(c.chat_id, 42);
+        assert_eq!(c.poll_interval, std::time::Duration::from_millis(100));
+        assert_eq!(c.long_poll_timeout, std::time::Duration::from_millis(200));
+    }
+
+    #[test]
+    fn discord_section_into_evy_comms_config() {
+        let s = DiscordSectionConfig {
+            bot_token: "tok".into(),
+            channel_id: 100,
+            application_id: 200,
+        };
+        let c: evy_comms::DiscordConfig = s.into();
+        assert_eq!(c.bot_token, "tok");
+        assert_eq!(c.channel_id, 100);
+        assert_eq!(c.application_id, 200);
+    }
+
+    #[test]
+    fn memory_defaults_are_tmp_paths() {
+        let m = MemoryConfig::default();
+        assert_eq!(m.observation_db, PathBuf::from("/tmp/evy-observations.db"));
+        assert_eq!(m.score_db, PathBuf::from("/tmp/evy-scores.db"));
+        assert_eq!(m.preferences_db, PathBuf::from("/tmp/evy-preferences.db"));
+        assert!(m.claude_mem_db.is_none());
     }
 }

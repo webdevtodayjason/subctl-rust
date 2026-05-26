@@ -2,19 +2,23 @@
 # overridden by env vars matching `EVY_<SECTION>__<KEY>` (double-underscore
 # is the section/key delimiter; figment's standard nested-env shape).
 #
-# Phase 1 (Slice E) — wires scheduler + policy + providers and runs the
-# Slice E smoke test. The default `db_path` lives in /tmp because the
-# smoke test must not pollute the operator's real state.
+# Phase 3 Slice E — the daemon now composes the FULL Phase 2+3 stack:
+# scheduler + providers + policy + comms (HTTP/SSE, optional Telegram
+# + Discord) + memory (observations, playbooks, scoring, preferences,
+# feedback). Each of the new sections is `#[serde(default)]` in
+# `Config::load_from` so operators who omit them still boot with sane
+# defaults; the values below are the recommended explicit set.
 
 [scheduler]
-db_path = "/tmp/evy-phase1-smoke.db"
+db_path = "/tmp/evy-scheduler.db"
 
 [policy]
 path = "config/policy.toml"
 
-# At least one of `claude_code` / `codex` must be present. The smoke test
-# constructs every configured provider, exercises healthcheck against it,
-# and logs the result. We do NOT dispatch real mandates in Phase 1.
+# At least one of `claude_code` / `codex` must be present. The daemon
+# constructs every configured provider and exercises healthcheck against
+# it; DeepSeek is always in the pool but its dispatch returns
+# `Error::Provider` per ADR 0020 Phase-deferred items.
 
 [providers.claude_code]
 # `CLAUDE_CONFIG_DIR` — per-account isolation. /tmp/claude-jason is a
@@ -30,3 +34,53 @@ codex_home = "/tmp/codex-smoke"
 tmux_session = "codex-smoke"
 working_dir = "."
 policy_mode = "Trusted"
+
+# ── Phase 3 Slice E ─ comms ──────────────────────────────────────────
+
+[comms.http]
+# Operator dashboard binds loopback on the v3 dashboard port so existing
+# curl recipes work without changes. Bind to 0.0.0.0 only on a trusted
+# LAN — there's no auth on this surface today.
+host = "127.0.0.1"
+port = 8787
+# Empty allowlist disables CORS entirely; populate for a remote browser.
+allow_origins = []
+
+# Telegram bridge — uncomment + populate to enable. Without it the
+# daemon falls through cleanly (no bridge spawned).
+#
+# [comms.telegram]
+# bot_token = "REPLACE_WITH_BOTFATHER_TOKEN"
+# chat_id = -1001234567890
+# poll_interval_ms = 1000
+# long_poll_timeout_ms = 25000
+
+# Discord bridge — uncomment + populate to enable. Same fall-through
+# semantics as Telegram.
+#
+# [comms.discord]
+# bot_token = "REPLACE_WITH_DISCORD_BOT_TOKEN"
+# channel_id = 1234567890123456789
+# application_id = 1234567890123456789
+
+# ── Phase 3 Slice E ─ memory ─────────────────────────────────────────
+
+[memory]
+# Sqlite paths the learning-loop substrate opens at boot. The migrator
+# is idempotent — three of these could safely point at the same file —
+# but four separate /tmp paths let operators wipe one substrate (e.g.
+# `rm /tmp/evy-scores.db`) without taking out the rest.
+observation_db = "/tmp/evy-observations.db"
+score_db = "/tmp/evy-scores.db"
+preferences_db = "/tmp/evy-preferences.db"
+
+# Directory of operator-authored `*.md` playbooks. The daemon creates it
+# if missing so first-boot doesn't crash. Recommend keeping the path
+# under source control (e.g. ./playbooks/) so operator-edited playbooks
+# get version-controlled.
+playbook_dir = "playbooks"
+
+# Optional: path to the operator's claude-mem sqlite db. When set, the
+# retriever (NaiveRetriever) surfaces cross-session priors via FTS5.
+# Unset = retrieval falls open without claude-mem.
+# claude_mem_db = "/Users/sem/.claude-mem/db.sqlite"
