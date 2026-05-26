@@ -69,6 +69,21 @@ pub enum ObservationKind {
         /// Reason for shutdown, e.g. `"sigterm"`, `"operator request"`.
         reason: String,
     },
+    /// An operator-feedback event was ingested.
+    ///
+    /// The feedback row itself lives in the `feedback` table; this
+    /// observation is a mirror that lets correlation- and time-ordered
+    /// retrieval see "operator pushed back at ts X on action Y" without
+    /// having to JOIN across tables.
+    FeedbackReceived {
+        /// Stable id of the feedback row in the `feedback` table.
+        feedback_id: Uuid,
+        /// Discriminator string of the [`super::feedback::FeedbackKind`]
+        /// variant — `"approved"`, `"rejected"`, `"corrected"`,
+        /// `"operator_preference"`. Free-form so feedback can grow
+        /// variants without breaking observation readers.
+        feedback_kind: String,
+    },
 }
 
 impl ObservationKind {
@@ -84,6 +99,7 @@ impl ObservationKind {
             Self::OperatorMessage { .. } => "operator_message",
             Self::DaemonBooted { .. } => "daemon_booted",
             Self::DaemonShutdown { .. } => "daemon_shutdown",
+            Self::FeedbackReceived { .. } => "feedback_received",
         }
     }
 }
