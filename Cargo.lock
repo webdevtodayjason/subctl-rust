@@ -899,6 +899,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "evy-thinking"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "evy-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
 name = "evy-tui"
 version = "0.1.0"
 dependencies = [

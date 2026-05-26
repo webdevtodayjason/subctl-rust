@@ -1,0 +1,52 @@
+[package]
+name = "evy-thinking"
+description = "Evy v4 thinking-partner surface: structured planning sessions backed by an LLM."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Core workspace types (errors at the seam are crate-local; we still
+# depend on evy-core so future variants of Mandate / PolicyMode become
+# reachable for "convert a planning session into a dispatch handoff").
+evy-core = { workspace = true }
+
+# Async runtime — `Mutex` lives in `tokio::sync` because the sessions
+# guard is held across `.await` on the LLM HTTP call.
+tokio = { workspace = true }
+
+# Trait objects with `async fn` (LlmBackend::respond).
+async-trait = { workspace = true }
+
+# Anthropic HTTP transport. `rustls-tls` matches evy-research and
+# evy-comms; `json` enables typed (de)serialization.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+
+# Serialization + time.
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = [
+    "std",
+    "clock",
+    "serde",
+] }
+
+# Session ids.
+uuid = { workspace = true }
+
+# Typed errors + logging.
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# Async test ergonomics + time travel for inactivity-timeout coverage.
+tokio = { workspace = true, features = ["full", "test-util"] }
+# Mock the Anthropic Messages API at the `reqwest` boundary so unit
+# tests never touch `api.anthropic.com`.
+wiremock = "0.6"
