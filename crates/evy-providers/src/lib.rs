@@ -34,12 +34,14 @@ pub mod claude_code;
 pub mod codex;
 pub mod config;
 pub mod deepseek;
+pub mod hmac;
 mod tmux;
 
 pub use claude_code::{ClaudeCodeProvider, ClaudeCodeWorker};
 pub use codex::{CodexProvider, CodexWorker};
 pub use config::{ClaudeCodeConfig, CodexConfig};
 pub use deepseek::DeepSeekProvider;
+pub use hmac::{HmacKey, TrustMarker};
 
 #[cfg(test)]
 mod object_safety {
@@ -58,6 +60,7 @@ mod object_safety {
             tmux_session: "claude-test".to_string(),
             working_dir: PathBuf::from("/tmp"),
             policy_mode: PolicyMode::Gated,
+            hmac_key: None,
         };
         let codex_cfg = CodexConfig {
             codex_home: PathBuf::from("/tmp/codex"),
@@ -65,6 +68,7 @@ mod object_safety {
             working_dir: PathBuf::from("/tmp"),
             model: None,
             policy_mode: PolicyMode::Gated,
+            hmac_key: None,
         };
         let providers: Vec<Box<dyn Provider>> = vec![
             Box::new(ClaudeCodeProvider::new(claude_cfg)),

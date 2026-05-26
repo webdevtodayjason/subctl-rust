@@ -22,6 +22,7 @@ use tokio::time::sleep;
 use tracing::{debug, info, instrument};
 
 use crate::config::ClaudeCodeConfig;
+use crate::hmac::{default_key, HmacKey, TrustMarker};
 use crate::tmux::{self, TmuxScope};
 
 const SCOPE: TmuxScope = TmuxScope(ProviderKind::ClaudeCode);
@@ -84,12 +85,18 @@ impl Provider for ClaudeCodeProvider {
 
         let worker_id = WorkerId::new();
         let window_name = window_name_for(worker_id);
-        let directive = compose_directive(mandate, self.config.policy_mode);
+        // Compose the body (Phase 1 markdown shape), then wrap in the
+        // ADR-0011 HMAC trust marker. The marker is what actually gets
+        // pasted; `compose_directive` remains the canonical body builder
+        // so its golden tests still apply to the inner payload.
+        let body = compose_directive(mandate, self.config.policy_mode);
+        let key = resolve_key(self.config.hmac_key.as_ref());
+        let directive = TrustMarker::new(body, Some(phase_for(mandate)), key).to_directive_string();
 
         info!(
             worker = ?worker_id,
             window = %window_name,
-            "spawning Claude Code worker"
+            "spawning Claude Code worker (HMAC-wrapped directive)"
         );
 
         tmux::new_window(
@@ -294,6 +301,30 @@ pub fn compose_directive(mandate: &Mandate, policy_mode: evy_core::PolicyMode) -
 fn window_name_for(worker_id: WorkerId) -> String {
     let s = worker_id.0.simple().to_string();
     format!("worker-{}", &s[..8])
+}
+
+/// Phase string baked into the HMAC trust marker. Derived from the
+/// mandate's `metadata["phase"]` when present, otherwise the literal
+/// `"dispatch"` so the marker still verifies. The phase is part of the
+/// HMAC input so v3 workers see a stable, predictable identifier.
+fn phase_for(mandate: &Mandate) -> String {
+    mandate
+        .metadata
+        .get("phase")
+        .cloned()
+        .unwrap_or_else(|| "dispatch".to_string())
+}
+
+/// Resolve the HMAC key to use for this dispatch. Caller-supplied key
+/// wins; otherwise fall back to the process-global default. See
+/// [`crate::hmac::default_key`] for why the fallback exists.
+///
+/// The returned reference's lifetime tracks the caller's `Option`. When
+/// we fall back to `default_key()` (`&'static HmacKey`) the static
+/// lifetime is implicitly coerced down to the elided one — no unsafe
+/// required.
+fn resolve_key(configured: Option<&HmacKey>) -> &HmacKey {
+    configured.unwrap_or_else(|| default_key())
 }
 
 /// tmux buffer name. Same uniqueness shape as the window name; the

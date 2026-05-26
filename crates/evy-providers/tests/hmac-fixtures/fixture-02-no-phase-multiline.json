@@ -1,0 +1,11 @@
+{
+  "_comment": "Byte-compatibility fixture captured from v3 components/evy/trust-marker.ts (buildSignedDirective). Covers the no-phase form AND multi-line body indentation (two-space indent under SPEC:).",
+  "secret_hex": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+  "phase": null,
+  "ts": "2026-05-26T17:15:30.500Z",
+  "body": "multi line directive\nsecond line\nthird line with leading text",
+  "hmac": "35a3647ab69b1442",
+  "signed_body": "SPEC:\n  multi line directive\n  second line\n  third line with leading text",
+  "marker": "[subctl-master directive · ts:2026-05-26T17:15:30.500Z · hmac:35a3647ab69b1442]",
+  "wire_format": "[subctl-master directive · ts:2026-05-26T17:15:30.500Z · hmac:35a3647ab69b1442]\nSPEC:\n  multi line directive\n  second line\n  third line with leading text"
+}

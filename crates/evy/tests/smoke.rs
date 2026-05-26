@@ -16,7 +16,7 @@ use std::time::Duration;
 use evy::config::{
     ClaudeCodeConfigToml, CodexConfigToml, PolicyConfig, ProvidersConfig, SchedulerConfig,
 };
-use evy::{run_daemon, Config};
+use evy::{run_smoke_test, Config};
 use evy_core::PolicyMode;
 use tempfile::tempdir;
 
@@ -70,7 +70,7 @@ async fn phase1_smoke_test_runs_cron_job_and_exits_clean() -> anyhow::Result<()>
         },
     };
 
-    let report = run_daemon(config).await?;
+    let report = run_smoke_test(config).await?;
 
     // Friction-flagged contract: 5-field cron has minute granularity, so
     // we budget the same 75s the scheduler's own integration test does.

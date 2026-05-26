@@ -84,11 +84,17 @@ pub struct ClaudeCodeConfigToml {
 
 impl From<ClaudeCodeConfigToml> for ClaudeCodeConfig {
     fn from(toml: ClaudeCodeConfigToml) -> Self {
+        // `hmac_key` is intentionally `None` at TOML-deserialize time:
+        // the daemon mints a per-session key at boot and attaches it
+        // via `with_hmac_key` before the config is handed to the
+        // provider constructor. Persisting the key in TOML would
+        // contradict ADR 0011's secret-hygiene rule.
         Self {
             claude_config_dir: toml.config_dir,
             tmux_session: toml.tmux_session,
             working_dir: toml.working_dir,
             policy_mode: toml.policy_mode,
+            hmac_key: None,
         }
     }
 }
@@ -112,12 +118,15 @@ pub struct CodexConfigToml {
 
 impl From<CodexConfigToml> for CodexConfig {
     fn from(toml: CodexConfigToml) -> Self {
+        // See ClaudeCodeConfigToml::from — `hmac_key` is attached at
+        // daemon boot, never serialized.
         Self {
             codex_home: toml.codex_home,
             tmux_session: toml.tmux_session,
             working_dir: toml.working_dir,
             model: toml.model,
             policy_mode: toml.policy_mode,
+            hmac_key: None,
         }
     }
 }

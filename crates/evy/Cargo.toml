@@ -36,6 +36,7 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 figment = { workspace = true }
 serde = { workspace = true }
+clap = { workspace = true }
 
 # Cron-aware timestamps for log lines + future "next fire" diagnostics.
 chrono = { version = "0.4", features = ["serde"] }

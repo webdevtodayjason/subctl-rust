@@ -1,0 +1,11 @@
+{
+  "_comment": "Byte-compatibility fixture captured from v3 components/evy/trust-marker.ts (buildSignedDirective). All-zero secret to catch sign-bit / endianness regressions in the HMAC implementation.",
+  "secret_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+  "phase": "verify",
+  "ts": "2026-05-26T18:00:00.000Z",
+  "body": "single line body",
+  "hmac": "a90e951eba4815c4",
+  "signed_body": "SPEC:\n  single line body",
+  "marker": "[subctl-master directive · phase=verify · ts:2026-05-26T18:00:00.000Z · hmac:a90e951eba4815c4]",
+  "wire_format": "[subctl-master directive · phase=verify · ts:2026-05-26T18:00:00.000Z · hmac:a90e951eba4815c4]\nSPEC:\n  single line body"
+}

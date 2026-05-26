@@ -30,6 +30,7 @@ use tokio::time::sleep;
 use tracing::{debug, info, instrument};
 
 use crate::config::CodexConfig;
+use crate::hmac::{default_key, HmacKey, TrustMarker};
 use crate::tmux::{self, TmuxScope};
 
 const SCOPE: TmuxScope = TmuxScope(ProviderKind::Codex);
@@ -87,12 +88,18 @@ impl Provider for CodexProvider {
 
         let worker_id = WorkerId::new();
         let window_name = window_name_for(worker_id);
-        let directive = compose_directive(mandate, self.config.policy_mode);
+        // Same wrap pattern as Claude: compose the body, then envelope
+        // it in the ADR-0011 HMAC trust marker. v3 workers verify the
+        // marker via in-prompt model reasoning; native verification is
+        // future work (see hmac::TrustMarker::verify).
+        let body = compose_directive(mandate, self.config.policy_mode);
+        let key = resolve_key(self.config.hmac_key.as_ref());
+        let directive = TrustMarker::new(body, Some(phase_for(mandate)), key).to_directive_string();
 
         info!(
             worker = ?worker_id,
             window = %window_name,
-            "spawning Codex worker"
+            "spawning Codex worker (HMAC-wrapped directive)"
         );
 
         tmux::new_window(
@@ -284,6 +291,23 @@ fn buffer_name_for(worker_id: WorkerId) -> String {
     format!("subctl-codex-{}", &s[..8])
 }
 
+/// Phase string baked into the HMAC trust marker — same convention as
+/// the Claude adapter (`metadata["phase"]` if set, else `"dispatch"`).
+fn phase_for(mandate: &Mandate) -> String {
+    mandate
+        .metadata
+        .get("phase")
+        .cloned()
+        .unwrap_or_else(|| "dispatch".to_string())
+}
+
+/// Resolve HMAC key — caller-supplied wins, else the process-global
+/// default. Same pattern as `claude_code::resolve_key`; deduped only by
+/// convention since the two adapters stay symmetrically simple.
+fn resolve_key(configured: Option<&HmacKey>) -> &HmacKey {
+    configured.unwrap_or_else(|| default_key())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,6 +341,7 @@ mod tests {
             working_dir: PathBuf::from("/tmp/codex-test"),
             model: Some("gpt-5.5".to_string()),
             policy_mode: evy_core::PolicyMode::Trusted,
+            hmac_key: None,
         }
     }
 

@@ -1,0 +1,11 @@
+{
+  "_comment": "Byte-compatibility fixture captured from v3 components/evy/trust-marker.ts (buildSignedDirective). Do NOT regenerate without bumping the wire-format version — workers spawned against these bytes must continue to verify.",
+  "secret_hex": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "phase": "bootstrap",
+  "ts": "2026-05-26T17:00:00.000Z",
+  "body": "ship slice 2A. tests green. clippy clean.",
+  "hmac": "c6e9161fad3ace49",
+  "signed_body": "SPEC:\n  ship slice 2A. tests green. clippy clean.",
+  "marker": "[subctl-master directive · phase=bootstrap · ts:2026-05-26T17:00:00.000Z · hmac:c6e9161fad3ace49]",
+  "wire_format": "[subctl-master directive · phase=bootstrap · ts:2026-05-26T17:00:00.000Z · hmac:c6e9161fad3ace49]\nSPEC:\n  ship slice 2A. tests green. clippy clean."
+}

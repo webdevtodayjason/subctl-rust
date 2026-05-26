@@ -8,10 +8,21 @@
 //! Configs are plain data — `#[derive(Debug, Clone)]` — so a single
 //! daemon can hold multiple `ClaudeCodeProvider` instances (one per
 //! pinned account) without trait-object juggling.
+//!
+//! # HMAC trust marker
+//!
+//! Each provider config carries an optional [`HmacKey`]. When `Some`,
+//! `dispatch` wraps the directive body in the ADR-0011 trust marker
+//! envelope before pasting via tmux. When `None`, dispatch falls back to
+//! [`crate::hmac::default_key`] — a process-global key minted on first
+//! access. The daemon binary supplies a fresh per-session key at boot;
+//! the fallback exists so unit tests don't have to construct a key.
 
 use std::path::PathBuf;
 
 use evy_core::PolicyMode;
+
+use crate::hmac::HmacKey;
 
 /// Construction-time configuration for [`crate::ClaudeCodeProvider`].
 ///
@@ -34,6 +45,10 @@ pub struct ClaudeCodeConfig {
     /// knows its autonomy ceiling. (The hard policy gate lives in
     /// `evy-policy`; this is just informational metadata for Phase 1.)
     pub policy_mode: PolicyMode,
+    /// Per-session HMAC key for ADR-0011 trust-marker authentication.
+    /// `None` falls back to [`crate::hmac::default_key`] — see module
+    /// rustdoc for the rationale.
+    pub hmac_key: Option<HmacKey>,
 }
 
 /// Construction-time configuration for [`crate::CodexProvider`].
@@ -60,4 +75,8 @@ pub struct CodexConfig {
     /// knows its autonomy ceiling. Codex's hard sandbox lives in the
     /// CLI flags; this is the additive learning-loop signal.
     pub policy_mode: PolicyMode,
+    /// Per-session HMAC key for ADR-0011 trust-marker authentication.
+    /// `None` falls back to [`crate::hmac::default_key`] — see module
+    /// rustdoc for the rationale.
+    pub hmac_key: Option<HmacKey>,
 }

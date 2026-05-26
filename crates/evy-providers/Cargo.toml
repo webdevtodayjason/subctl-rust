@@ -17,3 +17,15 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 uuid = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+# HMAC trust marker (ADR 0011 — byte-compatible with v3 trust-marker.ts).
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+# anyhow only in test scaffolding (`tests/real_claude_code_spawn.rs`);
+# library code returns the workspace `evy_core::Result` per house style.
+anyhow = { workspace = true }

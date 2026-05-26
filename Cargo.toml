@@ -60,6 +60,14 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # CLI (declared for future subctl CLI; not consumed by the daemon yet)
 clap = { version = "4", features = ["derive"] }
 
+# HMAC trust marker (ADR 0011 — byte-compatible with v3 trust-marker.ts).
+# Declared at workspace level so any future emitter / verifier of
+# directive markers reaches for the same crypto primitives.
+hmac = "0.13"
+sha2 = "0.11"
+hex = "0.4"
+rand = "0.10"
+
 # Internal workspace crates
 evy-core = { path = "crates/evy-core", version = "0.1.0" }
 evy-policy = { path = "crates/evy-policy", version = "0.1.0" }
