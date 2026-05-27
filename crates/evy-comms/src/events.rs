@@ -75,6 +75,23 @@ pub enum DaemonEvent {
         /// How many providers passed their last healthcheck.
         providers_healthy: usize,
     },
+
+    /// One watchdog tick completed.
+    ///
+    /// Emitted by `evy_watchdog::WatchdogRegistry` after each
+    /// scheduled tick. Carries only summary information — full
+    /// `TickReport`s are written to the observation log and queried
+    /// from the dashboard on demand, keeping the SSE wire small.
+    WatchdogTick {
+        /// Watchdog identifier (`evy_watchdog::Watchdog::name()`).
+        name: String,
+        /// Number of findings produced by this tick. `Healthy`
+        /// counts as one finding.
+        finding_count: usize,
+        /// True iff the watchdog itself ran cleanly (no timeout, no
+        /// internal error). Independent of `finding_count`.
+        healthy: bool,
+    },
 }
 
 #[cfg(test)]
@@ -148,6 +165,19 @@ mod tests {
         };
         let s = serde_json::to_string(&ev).unwrap();
         assert!(s.contains("\"type\":\"heartbeat\""));
+        let back: DaemonEvent = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, ev);
+    }
+
+    #[test]
+    fn watchdog_tick_uses_snake_case_tag() {
+        let ev = DaemonEvent::WatchdogTick {
+            name: "idle-pane".to_owned(),
+            finding_count: 2,
+            healthy: true,
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        assert!(s.contains("\"type\":\"watchdog_tick\""));
         let back: DaemonEvent = serde_json::from_str(&s).unwrap();
         assert_eq!(back, ev);
     }

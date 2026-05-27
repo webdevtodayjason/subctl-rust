@@ -10,6 +10,7 @@ members = [
     "crates/evy-research",
     "crates/evy-thinking",
     "crates/evy-tui",
+    "crates/evy-watchdog",
     "crates/evy",
 ]
 
