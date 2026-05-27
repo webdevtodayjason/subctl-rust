@@ -22,6 +22,19 @@ uuid = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 gray_matter = { version = "0.2", default-features = false, features = ["yaml"] }
 
+# Phase 4 Slice E: Tier 4 (Cognee) HTTP client + promotion ticker.
+# `rustls-tls` + `json` mirrors evy-voice / evy-thinking / evy-providers.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+# CancellationToken for the PromotionTicker::run shutdown signal —
+# matches evy-voice + evy-providers usage.
+tokio-util = { version = "0.7", features = ["rt"] }
+
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true, features = ["full", "test-util", "macros"] }
+# Mock the Cognee HTTP endpoint at the reqwest boundary so unit-style
+# integration tests never touch a real Cognee service.
+wiremock = "0.6"

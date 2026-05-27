@@ -36,6 +36,18 @@ pub(crate) fn bad_playbook(path: impl std::fmt::Debug, reason: impl std::fmt::Di
     Error::InvalidMandate(format!("playbook {path:?}: {reason}"))
 }
 
+/// Wrap a reqwest transport error as an io error so it threads through
+/// `Error::Io`. Used by the Cognee HTTP client.
+pub(crate) fn from_reqwest(err: reqwest::Error) -> Error {
+    Error::Io(io::Error::other(format!("cognee http: {err}")))
+}
+
+/// Wrap an unexpected Cognee response (non-2xx, body parse failure) as
+/// an io error.
+pub(crate) fn cognee_status(status: u16, body: impl std::fmt::Display) -> Error {
+    Error::Io(io::Error::other(format!("cognee http {status}: {body}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
