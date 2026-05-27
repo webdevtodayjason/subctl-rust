@@ -5,6 +5,7 @@ members = [
     "crates/evy-policy",
     "crates/evy-providers",
     "crates/evy-scheduler",
+    "crates/evy-secrets",
     "crates/evy-comms",
     "crates/evy-memory",
     "crates/evy-research",
