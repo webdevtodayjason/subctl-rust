@@ -903,6 +903,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "evy-skills"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "evy-core",
+ "gray_matter",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "evy-thinking"
 version = "0.1.0"
 dependencies = [
