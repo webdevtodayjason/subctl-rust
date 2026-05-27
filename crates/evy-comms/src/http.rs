@@ -14,6 +14,7 @@
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -31,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
 use crate::config::HttpConfig;
@@ -189,7 +191,12 @@ impl HttpServer {
         let local_addr = listener
             .local_addr()
             .map_err(|source| CommsError::Bind { addr, source })?;
-        let router = build_router(self.broadcaster, self.state, &self.config.allow_origins)?;
+        let router = build_router(
+            self.broadcaster,
+            self.state,
+            &self.config.allow_origins,
+            self.config.static_dir.as_deref(),
+        )?;
         Ok(BoundHttpServer {
             listener,
             local_addr,
@@ -275,6 +282,7 @@ fn build_router(
     broadcaster: EventBroadcaster,
     app: Arc<dyn AppState>,
     allow_origins: &[String],
+    static_dir: Option<&Path>,
 ) -> Result<Router> {
     let state = HttpState {
         broadcaster,
@@ -292,7 +300,7 @@ fn build_router(
     // the alias path explicitly instead. Mirrors v3 dashboard's
     // operator-visible behaviour (line 2920 of `dashboard/server.ts`)
     // even though the rewrite happens in routing rather than a layer.
-    let router = Router::new()
+    let mut router = Router::new()
         .route("/health", get(health_handler))
         .route("/api/version", get(version_handler))
         .route("/api/evy/events", get(events_handler))
@@ -302,7 +310,19 @@ fn build_router(
         .route("/api/evy/scheduler/jobs", get(jobs_handler))
         .route("/api/master/scheduler/jobs", get(jobs_handler))
         .route("/api/evy/policy", get(policy_handler))
-        .route("/api/master/policy", get(policy_handler))
+        .route("/api/master/policy", get(policy_handler));
+
+    // Phase 4 Slice A: optionally serve the operator-console static
+    // bundle as a fallback. ServeDir resolves `index.html` automatically
+    // on `GET /`, so the SPA shell loads without extra wiring. The
+    // fallback rank means API routes always win — only unmatched paths
+    // fall through to the static surface.
+    if let Some(dir) = static_dir {
+        tracing::info!(static_dir = %dir.display(), "evy-comms serving operator console");
+        router = router.fallback_service(ServeDir::new(dir));
+    }
+
+    let router = router
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -420,7 +440,7 @@ mod tests {
     fn build_router_with_empty_origins_succeeds() {
         let broadcaster = EventBroadcaster::default();
         let state: Arc<dyn AppState> = Arc::new(StubAppState);
-        let router = build_router(broadcaster, state, &[]).unwrap();
+        let router = build_router(broadcaster, state, &[], None).unwrap();
         // Constructing the router is the assertion; if it builds, the
         // route set is internally consistent.
         let _ = router;
@@ -430,8 +450,13 @@ mod tests {
     fn build_router_with_origins_succeeds() {
         let broadcaster = EventBroadcaster::default();
         let state: Arc<dyn AppState> = Arc::new(StubAppState);
-        let router =
-            build_router(broadcaster, state, &["http://127.0.0.1:8787".to_owned()]).unwrap();
+        let router = build_router(
+            broadcaster,
+            state,
+            &["http://127.0.0.1:8787".to_owned()],
+            None,
+        )
+        .unwrap();
         let _ = router;
     }
 
@@ -441,7 +466,18 @@ mod tests {
         let state: Arc<dyn AppState> = Arc::new(StubAppState);
         // Non-ASCII byte makes the HeaderValue parse fail.
         let bad = String::from("http://localhost\n:8787");
-        let err = build_router(broadcaster, state, &[bad]).unwrap_err();
+        let err = build_router(broadcaster, state, &[bad], None).unwrap_err();
         assert!(matches!(err, CommsError::Cors(_)));
+    }
+
+    #[test]
+    fn build_router_with_static_dir_succeeds() {
+        let broadcaster = EventBroadcaster::default();
+        let state: Arc<dyn AppState> = Arc::new(StubAppState);
+        // Pointing at the in-repo static bundle is fine; ServeDir does
+        // not eagerly read the directory at construction time.
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("static");
+        let router = build_router(broadcaster, state, &[], Some(&dir)).unwrap();
+        let _ = router;
     }
 }

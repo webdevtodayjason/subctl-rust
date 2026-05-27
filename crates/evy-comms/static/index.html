@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>evy — operator console</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-name">evy</span>
+      <span class="brand-tag" id="version-chip" title="evy-comms version">v—</span>
+    </div>
+    <div class="topbar-right">
+      <span class="pulse-dot" id="pulse-dot" aria-hidden="true"></span>
+      <span class="status-pill" id="status-pill">
+        <span class="dot dim"></span>
+        <span class="status-text">connecting…</span>
+      </span>
+    </div>
+  </header>
+
+  <div class="app-shell">
+    <aside class="sidebar">
+      <nav class="sidebar-nav" id="sidebar-nav">
+        <a class="nav-btn" data-tab="workers" href="#workers">
+          <span class="nav-icon">▦</span><span class="nav-label">Workers</span>
+        </a>
+        <a class="nav-btn" data-tab="scheduler" href="#scheduler">
+          <span class="nav-icon">◷</span><span class="nav-label">Scheduler</span>
+        </a>
+        <a class="nav-btn" data-tab="events" href="#events">
+          <span class="nav-icon">≣</span><span class="nav-label">Events</span>
+        </a>
+        <a class="nav-btn" data-tab="policy" href="#policy">
+          <span class="nav-icon">⛒</span><span class="nav-label">Policy</span>
+        </a>
+      </nav>
+    </aside>
+
+    <main class="content" id="content">
+      <div class="panel empty" id="boot-placeholder">
+        <h2>Operator console</h2>
+        <p class="dim">Loading…</p>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

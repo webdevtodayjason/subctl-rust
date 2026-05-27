@@ -200,10 +200,15 @@ impl Default for HttpSectionConfig {
 
 impl From<HttpSectionConfig> for evy_comms::HttpConfig {
     fn from(s: HttpSectionConfig) -> Self {
+        // Phase 4 Slice A: `static_dir` is a runtime/install-layout
+        // decision the daemon binary makes — TOML doesn't carry it, so
+        // we always pass `None` here and let the binary set the dir via
+        // `HttpConfig::with_static_dir(...)` after this conversion.
         Self {
             host: s.host,
             port: s.port,
             allow_origins: s.allow_origins,
+            static_dir: None,
         }
     }
 }
