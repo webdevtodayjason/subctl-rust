@@ -1,0 +1,40 @@
+[package]
+name = "evy-secrets"
+description = "Evy v4 secrets layer: pluggable backends (env / file / 1Password) behind a priority-ordered resolver."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# `SecretsBackend` is an async trait — async-trait keeps the dyn dispatch
+# story simple (so a `Vec<Arc<dyn SecretsBackend>>` chain in the resolver
+# just works without per-call boxing gymnastics at the call site).
+async-trait = { workspace = true }
+
+# tokio::process::Command for the 1Password `op` shell-out, plus the
+# runtime for the trait's async resolve(). Workspace pin (`full`) keeps
+# this crate aligned with the rest of v4.
+tokio = { workspace = true }
+
+# JSON file backend payload + ergonomic borrows for the parser.
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Typed errors at the library boundary — the daemon (anyhow at its
+# outer edge) wraps these with `.context(...)`.
+thiserror = { workspace = true }
+
+# Structured logging. Sensitive values NEVER appear in any log line
+# produced by this crate — only key names, backend names, and "found
+# via X" telemetry.
+tracing = { workspace = true }
+
+[dev-dependencies]
+# tempdirs for the file-backend round-trip and for the on-PATH `op`
+# mock harness used by the 1Password backend integration test.
+tempfile = "3"
+# Async test runner + clock controls if a future test needs them.
+tokio = { workspace = true, features = ["full", "test-util"] }
