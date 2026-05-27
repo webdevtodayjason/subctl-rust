@@ -1,0 +1,77 @@
+[package]
+name = "evy-voice"
+description = "Evy v4 voice layer: TTS client, file-backed config + watcher, cache, egress redaction."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Workspace primitives. The voice layer is a thin consumer of the v4
+# error type and async runtime; no policy / scheduler dependence — the
+# eventual evy-comms bridge wires this in at the outer edge.
+evy-core = { workspace = true }
+
+# Async runtime. We need `sync` for `watch` channels and `time` for the
+# file-watcher debounce.
+tokio = { workspace = true }
+
+# CancellationToken — matches evy-comms' shutdown style. Used to signal
+# the file-watcher background task to unwind when the store is dropped.
+tokio-util = { version = "0.7", features = ["rt"] }
+
+# HTTP client for the local TTS server. `rustls-tls` avoids the OpenSSL
+# footgun; `json` enables typed request bodies. Version matches the
+# rest of the workspace (evy-comms, evy-research, evy-providers).
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+
+# Serialization.
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Filesystem watcher. notify 8 gives us recommended_watcher() backed by
+# FSEvents on macOS; we layer our own 200ms debounce on top — matches
+# v3 voice-config.ts which documented the "atomic-rename fires twice on
+# macOS" trap. notify-debouncer-full was intentionally NOT pulled in to
+# keep the dep tree shallow.
+notify = "8"
+
+# Cache fingerprint = SHA256(text|voice_id|model). sha2/hex live at the
+# workspace level for the HMAC trust marker already; reuse them here.
+sha2 = { workspace = true }
+hex = { workspace = true }
+
+# Egress redaction patterns.
+regex = "1"
+
+# Timestamps on the VoiceStatus surface (for /voice/status callers).
+# Match neighbor style (evy-research / evy-comms) — default-features off.
+chrono = { version = "0.4", default-features = false, features = [
+    "std",
+    "clock",
+    "serde",
+] }
+
+# Declared in the spec; kept available so a future TtsBackend trait
+# can move to dyn dispatch without a Cargo churn cycle.
+async-trait = { workspace = true }
+
+# Errors + logging.
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# `test-util` for tokio::time::pause/advance if needed; `full` for the
+# integration tests' fs-watch test that drives a real tokio runtime.
+tokio = { workspace = true, features = ["full", "test-util"] }
+# Tmp dirs for the config-watcher + cache integration tests so they
+# never touch ~/.config/subctl/voice.json.
+tempfile = "3"
+# Mock the TTS HTTP endpoint at the reqwest boundary so tests never
+# touch a real :8789 server.
+wiremock = "0.6"
