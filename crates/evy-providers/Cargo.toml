@@ -37,6 +37,14 @@ reqwest = { version = "0.12", default-features = false, features = [
 # Bare (no `rt` feature) — we don't need `TaskTracker` here.
 tokio-util = "0.7"
 
+# ── Phase 4 Slice D: OAuth (Codex device-flow + xAI refresh) ─────────────
+# URL parsing for the xAI host-pin validator. Refusing any token_endpoint
+# that isn't HTTPS on x.ai / *.x.ai is the defense against a one-time MITM
+# during discovery turning into a permanent refresh_token leak.
+url = "2"
+# JWT `exp` claim decoding for the Codex refresh-on-near-expiry path.
+base64 = "0.22"
+
 [dev-dependencies]
 # anyhow only in test scaffolding (`tests/real_claude_code_spawn.rs`);
 # library code returns the workspace `evy_core::Result` per house style.

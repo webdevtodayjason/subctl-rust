@@ -38,6 +38,7 @@ pub mod codex;
 pub mod config;
 pub mod deepseek;
 pub mod hmac;
+pub mod oauth;
 mod tmux;
 
 pub use claude_code::{ClaudeCodeProvider, ClaudeCodeWorker};
@@ -45,6 +46,10 @@ pub use codex::{CodexProvider, CodexWorker};
 pub use config::{ClaudeCodeConfig, CodexConfig};
 pub use deepseek::{DeepSeekConfig, DeepSeekProvider, DeepSeekWorker};
 pub use hmac::{HmacKey, TrustMarker};
+pub use oauth::{
+    AccessToken, AccountRecord, AccountRow, AccountsStore, CodexOauth, DeviceCodeResponse,
+    OauthError, OauthFlow, RefreshDedup, TokenRecord, XaiOauth,
+};
 
 #[cfg(test)]
 mod object_safety {
