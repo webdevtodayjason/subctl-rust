@@ -5,6 +5,7 @@
 //! `reqwest`, and assert against the wire shape — not internal types.
 //! That's deliberate: these tests are the contract the dashboard sees.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -44,6 +45,27 @@ async fn spawn_server_with_state(
 
 async fn spawn_stub_server() -> (String, EventBroadcaster, CancellationToken) {
     spawn_server_with_state(Arc::new(StubAppState)).await
+}
+
+/// Helper: bind an ephemeral server that also serves the in-repo
+/// `static/` directory. Used by the Phase 4 Slice A regression + happy-
+/// path tests below.
+async fn spawn_stub_server_with_static() -> (String, EventBroadcaster, CancellationToken, PathBuf) {
+    let static_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static");
+    let config = HttpConfig::ephemeral().with_static_dir(static_dir.clone());
+    let broadcaster = EventBroadcaster::new(64);
+    let server = HttpServer::with_stub_state(config, broadcaster.clone());
+    let bound = server.bind().await.expect("bind ephemeral");
+    let addr = bound.local_addr();
+    let shutdown = CancellationToken::new();
+    let shutdown_for_task = shutdown.clone();
+    tokio::spawn(async move {
+        if let Err(e) = bound.serve(shutdown_for_task).await {
+            eprintln!("serve task errored: {e}");
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    (format!("http://{addr}"), broadcaster, shutdown, static_dir)
 }
 
 #[tokio::test]
@@ -281,4 +303,128 @@ async fn shutdown_token_stops_server_promptly() {
         post.is_err(),
         "expected connection refused after shutdown, got {post:?}",
     );
+}
+
+// ─── Phase 4 Slice A: static-file surface ───────────────────────────
+
+#[tokio::test]
+async fn root_serves_operator_console_html_when_static_dir_set() {
+    let (base, _bcast, shutdown, static_dir) = spawn_stub_server_with_static().await;
+    assert!(
+        static_dir.join("index.html").is_file(),
+        "test prerequisite: {} must exist",
+        static_dir.join("index.html").display(),
+    );
+
+    let res = reqwest::get(format!("{base}/"))
+        .await
+        .expect("GET / against static-enabled server");
+    assert_eq!(res.status(), 200, "expected 200 from /");
+    let ct = res
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        ct.starts_with("text/html"),
+        "expected text/html content-type, got {ct}",
+    );
+    let body = res.text().await.expect("read body");
+    assert!(
+        body.contains("evy") && body.contains("<html"),
+        "expected HTML containing 'evy' brand, got {body:?}",
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn static_dir_serves_named_assets() {
+    let (base, _bcast, shutdown, _static_dir) = spawn_stub_server_with_static().await;
+
+    // app.js — module entry. Content-type should be JS-flavoured.
+    let res = reqwest::get(format!("{base}/app.js"))
+        .await
+        .expect("GET /app.js");
+    assert_eq!(res.status(), 200);
+    let ct = res
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        ct.contains("javascript"),
+        "expected javascript content-type, got {ct}",
+    );
+
+    // A per-tab module under tabs/.
+    let res = reqwest::get(format!("{base}/tabs/workers.js"))
+        .await
+        .expect("GET /tabs/workers.js");
+    assert_eq!(res.status(), 200);
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn json_endpoints_still_win_against_static_fallback() {
+    // Regression: when static_dir is set, ServeDir is registered as the
+    // *fallback* — the API routes must still take precedence. Without
+    // this guard, a future refactor could accidentally route /health to
+    // the static surface and break every operator script.
+    let (base, _bcast, shutdown, _) = spawn_stub_server_with_static().await;
+
+    let res = reqwest::get(format!("{base}/health")).await.unwrap();
+    assert_eq!(res.status(), 200);
+    let ct = res
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        ct.starts_with("application/json"),
+        "expected application/json from /health, got {ct}",
+    );
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(body["ok"], Value::Bool(true));
+
+    let res = reqwest::get(format!("{base}/api/version")).await.unwrap();
+    assert_eq!(res.status(), 200);
+    let body: Value = res.json().await.unwrap();
+    assert!(body["version"].is_string());
+
+    let res = reqwest::get(format!("{base}/api/evy/workers"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    assert!(res.json::<Value>().await.unwrap().is_array());
+
+    let res = reqwest::get(format!("{base}/api/evy/scheduler/jobs"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    assert!(res.json::<Value>().await.unwrap().is_array());
+
+    let res = reqwest::get(format!("{base}/api/evy/policy"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    assert!(res.json::<Value>().await.unwrap().is_object());
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn missing_static_asset_yields_404() {
+    let (base, _bcast, shutdown, _) = spawn_stub_server_with_static().await;
+
+    let res = reqwest::get(format!("{base}/does-not-exist.js"))
+        .await
+        .expect("GET unknown asset");
+    assert_eq!(res.status(), 404);
+
+    shutdown.cancel();
 }

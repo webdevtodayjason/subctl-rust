@@ -25,7 +25,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 # HTTP layer (axum 0.8 / tower 0.5 / tower-http 0.6).
 axum = { workspace = true }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
 http = "1"
 
 # Serialization + time + ids.
