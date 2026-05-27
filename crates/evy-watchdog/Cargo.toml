@@ -1,0 +1,42 @@
+[package]
+name = "evy-watchdog"
+description = "Evy v4 watchdog framework + Phase-4 watchdog impls (idle pane, team GC, prune)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Workspace primitives.
+evy-core = { workspace = true }
+evy-providers = { workspace = true }
+evy-scheduler = { workspace = true }
+evy-comms = { workspace = true }
+evy-memory = { workspace = true }
+
+# Async runtime + cancellation token for graceful shutdown.
+tokio = { workspace = true }
+tokio-util = { version = "0.7", features = ["rt"] }
+
+# Trait objects with async fns.
+async-trait = { workspace = true }
+
+# Serialization + time + ids.
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = [
+    "std",
+    "clock",
+    "serde",
+] }
+uuid = { workspace = true }
+
+# Errors + logging.
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tempfile = "3"
