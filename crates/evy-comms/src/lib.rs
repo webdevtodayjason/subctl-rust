@@ -73,6 +73,10 @@ pub mod discord_config;
 // ── Phase 6 Slice: chat surface ──────────────────────────────────────
 pub mod chat;
 
+// ── Phase 6 follow-up: TUI-driving endpoints ─────────────────────────
+pub mod sessions_http;
+pub mod skills_http;
+
 // ── Public re-exports — the surface the daemon binary consumes ───────
 
 pub use config::{HttpConfig, DEFAULT_HOST, DEFAULT_PORT};
@@ -88,4 +92,7 @@ pub use telegram::{InboundMessage, TelegramBridge, TelegramConfig};
 pub use discord::{render_embed, DiscordBridge, Embed, EmbedField};
 pub use discord_config::DiscordConfig;
 
-pub use chat::{ChatError, ChatRequest, ChatResponse};
+pub use chat::{ChatError, ChatRequest, ChatResponse, ChatStreamEvent};
+
+pub use sessions_http::{SessionSummary, SessionsError, SessionsListResponse};
+pub use skills_http::{SkillSummary, SkillsError, SkillsListResponse};

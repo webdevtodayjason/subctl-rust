@@ -88,3 +88,6 @@ futures-util = "0.3"
 # Mock the Telegram HTTPS endpoint at the `reqwest` boundary so tests
 # never touch the real Bot API.
 wiremock = "0.6"
+# `tests/skills_http_integration.rs` writes a fixture skill catalog to a
+# disposable directory. Matches the version `evy-thinking` already uses.
+tempfile = "3"

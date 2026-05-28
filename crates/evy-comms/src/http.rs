@@ -22,7 +22,7 @@ use axum::{
     extract::State,
     http::{HeaderValue, StatusCode},
     response::{IntoResponse, Json, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use evy_core::{MandateId, ProviderKind, WorkerId, WorkerStatus};
@@ -339,7 +339,33 @@ fn build_router(
         // for parity with v3 dashboards even though there's no v3
         // equivalent (legacy operators may script either prefix).
         .route("/api/evy/chat", post(crate::chat::chat_handler))
-        .route("/api/master/chat", post(crate::chat::chat_handler));
+        .route("/api/master/chat", post(crate::chat::chat_handler))
+        // Phase 6 follow-up — TUI-driving endpoints. Aliased under
+        // /api/master for parity with the other operator routes.
+        .route(
+            "/api/evy/sessions",
+            get(crate::sessions_http::sessions_list_handler),
+        )
+        .route(
+            "/api/master/sessions",
+            get(crate::sessions_http::sessions_list_handler),
+        )
+        .route(
+            "/api/evy/sessions/{id}",
+            delete(crate::sessions_http::sessions_delete_handler),
+        )
+        .route(
+            "/api/master/sessions/{id}",
+            delete(crate::sessions_http::sessions_delete_handler),
+        )
+        .route(
+            "/api/evy/skills",
+            get(crate::skills_http::skills_list_handler),
+        )
+        .route(
+            "/api/master/skills",
+            get(crate::skills_http::skills_list_handler),
+        );
 
     // Phase 4 Slice A: optionally serve the operator-console static
     // bundle as a fallback. ServeDir resolves `index.html` automatically

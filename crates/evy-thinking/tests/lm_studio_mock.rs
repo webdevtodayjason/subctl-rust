@@ -11,11 +11,13 @@
 use std::time::Duration;
 
 use serde_json::{json, Value};
+use tokio::sync::mpsc;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use evy_thinking::{
-    LlmBackend, LmStudioBackend, LmStudioConfig, Message, Role, SessionId, ThinkingError,
+    LlmBackend, LmStudioBackend, LmStudioConfig, Message, Role, SessionId, StreamChunk,
+    ThinkingError,
 };
 
 fn cfg(server_url: &str) -> LmStudioConfig {
@@ -285,6 +287,125 @@ async fn health_returns_transport_error_when_endpoint_unreachable() {
 // Requires LM Studio's Local Server toggled ON with at least one model
 // loaded. Asserts the round-trip succeeds and returns a non-empty
 // response. No specific content assertion — local model output varies.
+
+/// Format an OpenAI-compat SSE stream body — `data: {...}\n\n` per
+/// chunk plus the terminator `data: [DONE]\n\n`. Used by the streaming
+/// mocks below.
+fn sse_body(chunks: &[&str]) -> String {
+    let mut out = String::new();
+    for c in chunks {
+        let frame = format!(
+            "data: {}\n\n",
+            json!({"choices":[{"delta":{"content": c}}]})
+        );
+        out.push_str(&frame);
+    }
+    out.push_str("data: [DONE]\n\n");
+    out
+}
+
+#[tokio::test]
+async fn stream_respond_forwards_tokens_from_sse_body() {
+    let server = MockServer::start().await;
+    let body = sse_body(&["Hel", "lo ", "world"]);
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(body)
+                .insert_header("content-type", "text/event-stream"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let backend = LmStudioBackend::new(cfg(&server.uri()));
+    let sid = SessionId::new();
+    let msgs = vec![Message::new(sid, Role::Operator, "go")];
+    let (tx, mut rx) = mpsc::channel::<StreamChunk>(16);
+    let assembled = backend
+        .stream_respond("sys", &msgs, &tx)
+        .await
+        .expect("stream ok");
+    drop(tx);
+
+    let mut tokens = Vec::new();
+    while let Some(chunk) = rx.recv().await {
+        match chunk {
+            StreamChunk::Token(t) => tokens.push(t),
+            _ => panic!("expected only Token chunks"),
+        }
+    }
+    assert_eq!(tokens, vec!["Hel", "lo ", "world"]);
+    assert_eq!(assembled, "Hello world");
+}
+
+#[tokio::test]
+async fn stream_respond_skips_role_only_preamble() {
+    let server = MockServer::start().await;
+    let preamble = format!(
+        "data: {}\n\n",
+        json!({"choices":[{"delta":{"role":"assistant"}}]})
+    );
+    let body = format!(
+        "{preamble}data: {}\n\ndata: [DONE]\n\n",
+        json!({"choices":[{"delta":{"content":"hi"}}]})
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(body)
+                .insert_header("content-type", "text/event-stream"),
+        )
+        .mount(&server)
+        .await;
+
+    let backend = LmStudioBackend::new(cfg(&server.uri()));
+    let sid = SessionId::new();
+    let msgs = vec![Message::new(sid, Role::Operator, "go")];
+    let (tx, mut rx) = mpsc::channel::<StreamChunk>(8);
+    let text = backend
+        .stream_respond("sys", &msgs, &tx)
+        .await
+        .expect("stream ok");
+    drop(tx);
+    let mut chunks = Vec::new();
+    while let Some(c) = rx.recv().await {
+        chunks.push(c);
+    }
+    assert_eq!(chunks.len(), 1, "preamble must be skipped");
+    assert!(matches!(chunks[0], StreamChunk::Token(ref t) if t == "hi"));
+    assert_eq!(text, "hi");
+}
+
+#[tokio::test]
+async fn stream_respond_returns_backend_refused_on_empty_stream() {
+    let server = MockServer::start().await;
+    // Stream that only carries the terminator.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string("data: [DONE]\n\n")
+                .insert_header("content-type", "text/event-stream"),
+        )
+        .mount(&server)
+        .await;
+
+    let backend = LmStudioBackend::new(cfg(&server.uri()));
+    let sid = SessionId::new();
+    let msgs = vec![Message::new(sid, Role::Operator, "go")];
+    let (tx, _rx) = mpsc::channel::<StreamChunk>(4);
+    let err = backend
+        .stream_respond("sys", &msgs, &tx)
+        .await
+        .expect_err("empty stream must surface");
+    assert!(
+        matches!(err, ThinkingError::BackendRefused(_)),
+        "got {err:?}"
+    );
+}
 
 #[tokio::test]
 #[ignore = "hits operator's local LM Studio; run manually with --ignored"]

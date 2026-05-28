@@ -66,12 +66,14 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use crate::backend::LlmBackend;
+use crate::backend::{LlmBackend, StreamChunk};
 use crate::error::{Result, ThinkingError};
 use crate::session::{Message, Role};
 
@@ -205,7 +207,17 @@ impl LmStudioBackend {
     /// System prompt is rendered as a leading `{"role": "system"}` entry
     /// in `messages[]` — this is the #1 difference from the Anthropic
     /// envelope, where `system` is a sibling field.
-    fn build_request_body(&self, system_prompt: &str, messages: &[Message]) -> Value {
+    ///
+    /// `stream` is set per-call: blocking [`LlmBackend::respond`] sends
+    /// `false`, streaming [`LlmBackend::stream_respond`] sends `true`
+    /// so LM Studio emits `data: {...}\n\n` chunks instead of a single
+    /// JSON envelope.
+    fn build_request_body_with_stream(
+        &self,
+        system_prompt: &str,
+        messages: &[Message],
+        stream: bool,
+    ) -> Value {
         let mut wire_messages: Vec<WireMessage> = Vec::with_capacity(messages.len() + 1);
         wire_messages.push(WireMessage {
             role: "system",
@@ -232,13 +244,57 @@ impl LmStudioBackend {
             messages: wire_messages,
             temperature: self.config.temperature,
             max_tokens: self.config.max_tokens,
-            stream: false,
+            stream,
         };
         // Serialise through serde_json::Value so the public surface (and
         // the tests) can introspect individual fields without rebuilding
         // the body. `to_value` is infallible for `Serialize` types whose
         // fields are all themselves `Serialize` — which ours are.
         serde_json::to_value(&body).expect("WireRequest is always serializable")
+    }
+
+    /// Backwards-compatible shim used by [`LlmBackend::respond`] — always
+    /// builds a non-streaming body.
+    fn build_request_body(&self, system_prompt: &str, messages: &[Message]) -> Value {
+        self.build_request_body_with_stream(system_prompt, messages, false)
+    }
+}
+
+/// Outcome of feeding one SSE `data:` line into the streaming parser.
+#[derive(Debug)]
+enum SseAction {
+    /// New token text to forward to the sink.
+    Token(String),
+    /// `data: [DONE]` sentinel — the stream is finished.
+    Done,
+    /// Frame parsed but carried nothing renderable (e.g. role-only
+    /// preamble, finish_reason without delta content).
+    Skip,
+}
+
+/// Parse one OpenAI-compat streaming `data: ...` payload.
+///
+/// LM Studio sends `data: [DONE]` as its terminator and `data: {...}`
+/// chunks of the shape `{"choices":[{"delta":{"content":"x"}}]}`. Each
+/// chunk may carry zero or more content characters; role-only previews
+/// and finish-reason finalisers carry no content.
+fn parse_sse_payload(payload: &str) -> std::result::Result<SseAction, ThinkingError> {
+    let payload = payload.trim();
+    if payload == "[DONE]" {
+        return Ok(SseAction::Done);
+    }
+    let parsed: WireStreamChunk = serde_json::from_str(payload)
+        .map_err(|e| ThinkingError::Decode(format!("lm-studio stream chunk: {e}")))?;
+    let text = parsed
+        .choices
+        .into_iter()
+        .next()
+        .and_then(|c| c.delta.content)
+        .unwrap_or_default();
+    if text.is_empty() {
+        Ok(SseAction::Skip)
+    } else {
+        Ok(SseAction::Token(text))
     }
 }
 
@@ -289,6 +345,98 @@ impl LlmBackend for LmStudioBackend {
         }
         Ok(text)
     }
+
+    /// Native OpenAI-compat streaming. Sends `stream: true` and parses
+    /// `data: {...}\n\n` frames from the body byte stream, forwarding
+    /// each delta as a `StreamChunk::Token` and returning the
+    /// concatenated text once the upstream sends `data: [DONE]`.
+    ///
+    /// Sink-send failures are non-fatal (the client disconnected) — we
+    /// stop forwarding but keep draining the upstream until the SSE
+    /// frame's terminal sentinel so the server-side reqwest connection
+    /// closes cleanly.
+    async fn stream_respond(
+        &self,
+        system_prompt: &str,
+        messages: &[Message],
+        sink: &mpsc::Sender<StreamChunk>,
+    ) -> Result<String> {
+        let body = self.build_request_body_with_stream(system_prompt, messages, true);
+
+        debug!(
+            endpoint = %self.config.endpoint,
+            model = ?self.config.model,
+            turns = messages.len(),
+            "evy-thinking: lm-studio stream_respond",
+        );
+
+        let resp = self
+            .http
+            .post(self.chat_url())
+            .header("content-type", "application/json")
+            .header("accept", "text/event-stream")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ThinkingError::Transport(e.without_url().to_string()))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let snippet = body_snippet(resp).await;
+            warn!(status, snippet = %snippet, "lm-studio stream non-2xx");
+            return Err(ThinkingError::HttpStatus { status, snippet });
+        }
+
+        let mut stream = resp.bytes_stream();
+        let mut buffer = String::new();
+        let mut assembled = String::new();
+        // Sink may have closed; once `false` we stop forwarding but
+        // keep draining so the upstream connection terminates cleanly.
+        let mut sink_alive = true;
+
+        'outer: while let Some(item) = stream.next().await {
+            let bytes =
+                item.map_err(|e| ThinkingError::Transport(format!("lm-studio stream: {e}")))?;
+            // Each chunk is utf8 — LM Studio sends only ASCII envelopes.
+            // We tolerate a partial multi-byte char straddling chunks by
+            // using from_utf8_lossy and re-buffering at the line level.
+            buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+            // Pull complete lines off the front of the buffer; OpenAI
+            // streaming separates events with "\n\n" but individual
+            // `data:` lines end at "\n", so a line-based scan works.
+            while let Some(newline) = buffer.find('\n') {
+                let line = buffer[..newline].trim().to_string();
+                buffer.drain(..=newline);
+                if line.is_empty() {
+                    continue;
+                }
+                let payload = match line.strip_prefix("data:") {
+                    Some(rest) => rest.trim(),
+                    None => continue, // ignore comments / unknown event fields
+                };
+                match parse_sse_payload(payload)? {
+                    SseAction::Token(tok) => {
+                        assembled.push_str(&tok);
+                        if sink_alive && sink.send(StreamChunk::Token(tok)).await.is_err() {
+                            sink_alive = false;
+                        }
+                    }
+                    SseAction::Done => {
+                        break 'outer;
+                    }
+                    SseAction::Skip => {}
+                }
+            }
+        }
+
+        if assembled.trim().is_empty() {
+            return Err(ThinkingError::BackendRefused(
+                "lm-studio stream produced no content before terminating".to_string(),
+            ));
+        }
+        Ok(assembled)
+    }
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────
@@ -333,6 +481,28 @@ struct WireChoice {
 struct WireChoiceMessage {
     #[serde(default)]
     content: String,
+}
+
+/// Streaming chunk shape. Each frame carries `choices[0].delta.content`
+/// when present; the role-only preamble and finish-reason finalisers
+/// arrive with `delta` absent or `delta.content == None`. We tolerate
+/// both via `Option`.
+#[derive(Debug, Deserialize)]
+struct WireStreamChunk {
+    #[serde(default)]
+    choices: Vec<WireStreamChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WireStreamChoice {
+    #[serde(default)]
+    delta: WireStreamDelta,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct WireStreamDelta {
+    #[serde(default)]
+    content: Option<String>,
 }
 
 #[cfg(test)]
@@ -473,5 +643,78 @@ mod tests {
         let raw = r#"{"id": "x", "object": "chat.completion", "choices": []}"#;
         let parsed: WireResponse = serde_json::from_str(raw).expect("decode");
         assert_eq!(parsed.choices.len(), 0);
+    }
+
+    #[test]
+    fn streaming_body_carries_stream_true() {
+        let b = LmStudioBackend::new(cfg());
+        let body = b.build_request_body_with_stream("sys", &[], true);
+        assert_eq!(body["stream"], true);
+    }
+
+    #[test]
+    fn parse_sse_payload_returns_done_for_sentinel() {
+        match parse_sse_payload("[DONE]").unwrap() {
+            SseAction::Done => {}
+            other => panic!("expected Done, got {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn parse_sse_payload_extracts_delta_content() {
+        let raw = r#"{"choices":[{"delta":{"content":"hi"}}]}"#;
+        match parse_sse_payload(raw).unwrap() {
+            SseAction::Token(t) => assert_eq!(t, "hi"),
+            _ => panic!("expected token"),
+        }
+    }
+
+    #[test]
+    fn parse_sse_payload_returns_skip_when_delta_empty() {
+        // Role-only preamble — `delta.content` is None.
+        let raw = r#"{"choices":[{"delta":{"role":"assistant"}}]}"#;
+        match parse_sse_payload(raw).unwrap() {
+            SseAction::Skip => {}
+            _ => panic!("expected skip"),
+        }
+    }
+
+    #[test]
+    fn parse_sse_payload_returns_skip_when_no_choices() {
+        // Some servers emit terminal frames with empty choices.
+        let raw = r#"{"choices":[]}"#;
+        match parse_sse_payload(raw).unwrap() {
+            SseAction::Skip => {}
+            _ => panic!("expected skip"),
+        }
+    }
+
+    #[test]
+    fn parse_sse_payload_decode_error_surfaces_as_thinking_error() {
+        let err = parse_sse_payload("not json").unwrap_err();
+        assert!(matches!(err, ThinkingError::Decode(_)));
+    }
+
+    #[tokio::test]
+    async fn stream_respond_default_impl_inherited_by_other_backends_compiles() {
+        // Compile-time check that the trait method has a default impl —
+        // we instantiate a tiny test backend that only implements
+        // `respond` and confirm `stream_respond` is reachable via
+        // dynamic dispatch.
+        struct Stub;
+        #[async_trait]
+        impl LlmBackend for Stub {
+            async fn respond(&self, _s: &str, _m: &[Message]) -> Result<String> {
+                Ok("hi".into())
+            }
+        }
+        let s: Box<dyn LlmBackend> = Box::new(Stub);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamChunk>(4);
+        let text = s.stream_respond("sys", &[], &tx).await.unwrap();
+        assert_eq!(text, "hi");
+        drop(tx);
+        let frame = rx.recv().await.expect("default-impl emits one chunk");
+        assert!(matches!(frame, StreamChunk::Token(t) if t == "hi"));
+        assert!(rx.recv().await.is_none());
     }
 }
