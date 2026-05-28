@@ -45,8 +45,14 @@ export function App(): React.ReactElement {
 
   const [history, setHistory] = useState<string[]>([])
   const [caretVisible, setCaretVisible] = useState(true)
+  const [spinnerIdx, setSpinnerIdx] = useState(0)
   const abortRef = useRef<AbortController | null>(null)
   const bootRef = useRef(false)
+
+  // Braille spinner — borrowed from Hermes's unicode-animations defaults.
+  // Single 8-frame cycle at 80ms keeps the layout still while making it
+  // obvious that work is in flight.
+  const SPINNER_FRAMES = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
 
   // Boot once: daemon autostart + read backend from config.
   useEffect(() => {
@@ -92,6 +98,18 @@ export function App(): React.ReactElement {
     return () => clearInterval(id)
   }, [transcript.isStreaming])
 
+  // Tick the spinner while streaming.
+  useEffect(() => {
+    if (!transcript.isStreaming) {
+      return
+    }
+    const id = setInterval(
+      () => setSpinnerIdx((i) => (i + 1) % SPINNER_FRAMES.length),
+      80
+    )
+    return () => clearInterval(id)
+  }, [transcript.isStreaming])
+
   // Submission pipeline — slash dispatch first, then chat stream.
   const handleSubmit = useCallback(
     async (text: string) => {
@@ -100,6 +118,10 @@ export function App(): React.ReactElement {
 
       const slash = parseSlashCommand(text)
       if (slash) {
+        // Echo the slash so the operator sees what they ran. Use a system
+        // msg (not user) so it renders dim and doesn't pretend to be a
+        // chat turn.  The dispatch can decide to append further output.
+        appendSystem(`> ${text.trim()}`)
         const outcome = await dispatchSlash(slash)
         if (outcome.kind === 'exit') {
           exit()
@@ -225,6 +247,7 @@ export function App(): React.ReactElement {
             text={transcript.streaming}
             liveSkills={transcript.liveSkills}
             caretVisible={caretVisible}
+            spinnerFrame={SPINNER_FRAMES[spinnerIdx] ?? '⠋'}
           />
         ) : null}
       </Box>

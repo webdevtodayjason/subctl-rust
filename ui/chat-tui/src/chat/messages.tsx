@@ -61,36 +61,30 @@ export function MessageRow(props: MessageRowProps): React.ReactElement {
   }
 
   // assistant
-  const hasMeta = (msg.skillsLoaded?.length ?? 0) > 0
+  //
+  // Meta block + `└─ Response` separator only renders when the daemon
+  // loaded a handful of skills this turn — the registry has 100+ entries
+  // and the daemon currently emits a `skill_loaded` for each, which would
+  // turn the meta block into a wall of noise.  Operator sees the full
+  // registry via /skills.  Threshold is intentionally conservative; the
+  // §12 pattern was designed for sparse "the model autoloaded X" signal.
+  const skills = msg.skillsLoaded ?? []
+  const showMeta = skills.length > 0 && skills.length <= 5
   return (
     <Box flexDirection="column" marginTop={1}>
-      {hasMeta && msg.skillsLoaded && msg.skillsLoaded.length > 0 ? (
+      {showMeta ? (
         <Box flexDirection="column">
-          <Box>
-            <Text color={t.color.border}>{t.brand.tool} </Text>
-            <Text color={t.color.muted} dimColor>
-              {`├─ skills loaded · ${msg.skillsLoaded.length}`}
-            </Text>
-          </Box>
-          {/* Show up to 3 skill names so the operator sees what landed. */}
-          {msg.skillsLoaded.slice(0, 3).map((s) => (
+          {skills.map((s) => (
             <Box key={s}>
-              <Text color={t.color.border}>{t.brand.tool}   </Text>
+              <Text color={t.color.border}>{t.brand.tool} </Text>
               <Text color={t.color.muted} dimColor>
-                ·{' '}
+                ├─ skill ·{' '}
               </Text>
               <Text color={t.color.muted}>{s}</Text>
             </Box>
           ))}
-          {msg.skillsLoaded.length > 3 ? (
-            <Box>
-              <Text color={t.color.border}>{t.brand.tool}   </Text>
-              <Text color={t.color.muted} dimColor>
-                · …+{msg.skillsLoaded.length - 3} more
-              </Text>
-            </Box>
-          ) : null}
           <Box>
+            <Text color={t.color.border}>{t.brand.tool} </Text>
             <Text color={t.color.border}>{RESPONSE_PREFIX}</Text>
             <Text color={t.color.muted} dimColor>
               {RESPONSE_LABEL}
@@ -116,19 +110,28 @@ interface StreamingRowProps {
   text: string
   liveSkills: readonly string[]
   caretVisible: boolean
+  spinnerFrame: string
 }
 
 export function StreamingRow(
   props: StreamingRowProps
 ): React.ReactElement {
-  const { theme: t, text, liveSkills, caretVisible } = props
+  const { theme: t, text, liveSkills, caretVisible, spinnerFrame } = props
+
+  // The daemon emits a `skill_loaded` event for every registered skill
+  // (100+ entries) before the first token frame.  We render that as a
+  // single dim "scanning skills…" line — never a count, never names —
+  // so the operator sees activity without being shouted at.  If by some
+  // chance only a handful are loaded, we'll surface them after the turn
+  // commits (see MessageRow).
   return (
     <Box flexDirection="column" marginTop={1}>
-      {liveSkills.length > 0 ? (
+      {liveSkills.length > 0 && text === '' ? (
         <Box>
           <Text color={t.color.border}>{t.brand.tool} </Text>
+          <Text color={t.color.accent}>{spinnerFrame}</Text>
           <Text color={t.color.muted} dimColor>
-            {`├─ loaded ${liveSkills.length} skill${liveSkills.length === 1 ? '' : 's'}`}
+            {' scanning skills…'}
           </Text>
         </Box>
       ) : null}

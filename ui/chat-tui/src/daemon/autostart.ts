@@ -108,8 +108,15 @@ export async function ensureDaemonRunning(opts?: {
   signal?: AbortSignal
 }): Promise<DaemonState> {
   // Fast path — /health works without touching launchctl at all.
+  // A 2-second hard timeout guards against a hung daemon process (the
+  // /health route exists but never replies) — otherwise the entire boot
+  // sequence would hang waiting for fetch to give up.
+  const fastTimeout = AbortSignal.timeout(2000)
+  const fastSignal = opts?.signal
+    ? mergeAbortSignals([opts.signal, fastTimeout])
+    : fastTimeout
   try {
-    const h = await getHealth({ url: opts?.url, signal: opts?.signal })
+    const h = await getHealth({ url: opts?.url, signal: fastSignal })
     if (h.ok) {
       return { status: 'running', version: h.version }
     }
@@ -161,3 +168,27 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 // Suppress unused import warning — we'll wire spawn() in when we need to
 // surface daemon stderr (Tier 2).
 void spawn
+
+/**
+ * Merge an arbitrary number of AbortSignals into one. Aborts as soon as
+ * any input aborts.  Used by `ensureDaemonRunning` to bound the fast-path
+ * health check while still honouring caller cancellation.
+ */
+function mergeAbortSignals(signals: readonly AbortSignal[]): AbortSignal {
+  const ctrl = new AbortController()
+  const onAbort = (sig: AbortSignal) => {
+    try {
+      ctrl.abort(sig.reason)
+    } catch {
+      // ignore
+    }
+  }
+  for (const sig of signals) {
+    if (sig.aborted) {
+      onAbort(sig)
+      return ctrl.signal
+    }
+    sig.addEventListener('abort', () => onAbort(sig), { once: true })
+  }
+  return ctrl.signal
+}

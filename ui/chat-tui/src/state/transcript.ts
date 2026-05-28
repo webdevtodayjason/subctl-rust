@@ -75,9 +75,41 @@ export function beginAssistantTurn(): void {
   })
 }
 
-export function appendToken(chunk: string): void {
+// Token-flush batching — Hermes batches at 16ms (STREAM_BATCH_MS, spec §4)
+// because per-token re-renders make Ink's screen-diff cost dominate.
+let _tokenBuf = ''
+let _tokenTimer: NodeJS.Timeout | null = null
+const STREAM_BATCH_MS = 16
+
+function flushTokens(): void {
+  if (_tokenBuf === '') {
+    _tokenTimer = null
+    return
+  }
   const state = $transcript.get()
-  $transcript.set({ ...state, streaming: state.streaming + chunk })
+  $transcript.set({ ...state, streaming: state.streaming + _tokenBuf })
+  _tokenBuf = ''
+  _tokenTimer = null
+}
+
+export function appendToken(chunk: string): void {
+  _tokenBuf += chunk
+  if (_tokenTimer === null) {
+    _tokenTimer = setTimeout(flushTokens, STREAM_BATCH_MS)
+  }
+}
+
+/** Flush pending tokens synchronously — call before committing/failing a turn. */
+function drainTokenBuffer(): void {
+  if (_tokenTimer !== null) {
+    clearTimeout(_tokenTimer)
+    _tokenTimer = null
+  }
+  if (_tokenBuf !== '') {
+    const state = $transcript.get()
+    $transcript.set({ ...state, streaming: state.streaming + _tokenBuf })
+    _tokenBuf = ''
+  }
 }
 
 export function recordSkillLoaded(name: string): void {
@@ -89,6 +121,7 @@ export function recordSkillLoaded(name: string): void {
 }
 
 export function completeAssistantTurn(sessionId: string): void {
+  drainTokenBuffer()
   const state = $transcript.get()
   const text = state.streaming
   const skillsLoaded = state.liveSkills
@@ -110,6 +143,7 @@ export function completeAssistantTurn(sessionId: string): void {
 }
 
 export function failAssistantTurn(message: string): void {
+  drainTokenBuffer()
   const state = $transcript.get()
   // Roll back the streaming buffer; surface the error as a system msg so
   // it remains visible across turns.
