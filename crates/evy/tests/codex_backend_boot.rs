@@ -142,6 +142,7 @@ async fn daemon_boots_with_codex_thinking_partner() -> Result<()> {
             api_key_env: "ANTHROPIC_API_KEY".to_string(),
             model: Some("gpt-5.5".to_string()),
             max_tokens: Some(2048),
+            lm_studio: None,
             codex: Some(CodexSectionConfig {
                 accounts_conf_path: accounts_conf_path.clone(),
                 account: "openai-tester".to_string(),
@@ -236,6 +237,7 @@ async fn daemon_fails_fast_when_codex_section_missing() -> Result<()> {
             api_key_env: "ANTHROPIC_API_KEY".to_string(),
             model: None,
             max_tokens: None,
+            lm_studio: None,
             // The whole point of this test — operator forgot to add
             // [thinking_partner.codex]. Daemon must fail fast at boot
             // with a clear error rather than 503'ing on every chat
