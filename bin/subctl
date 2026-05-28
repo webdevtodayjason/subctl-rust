@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
-# subctl — launcher for the v4 Ink chat TUI.
+# subctl — v4 entry point.  Default behaviour is to launch the Ink chat
+# TUI; daemon control + diagnostics are handled inline so the operator
+# doesn't pay Node start-up cost for them.
 #
-# Resolves the bundle relative to the script so dev-mode works from the
-# worktree without an install pass. The install-integrator worker rewrites
-# the bundle path to ~/.local/lib/subctl-rust/ui/bundle.js once the install
-# slice lands.
-#
-# Subcommands handled outside the TUI (daemon control, logs, version) will
-# land in a follow-up; for now every invocation goes straight into chat.
+# Dev mode resolves the JS bundle relative to the script. The install-
+# integrator worker rewrites this to the production install path once
+# the install slice lands.
 
 set -euo pipefail
 
@@ -15,15 +13,147 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" >/dev/null 2>&1 && pwd)"
 WORKSPACE_ROOT="$(cd -- "${SCRIPT_DIR}/.." >/dev/null 2>&1 && pwd)"
 BUNDLE="${WORKSPACE_ROOT}/ui/chat-tui/dist/bundle.js"
 
-if ! command -v node >/dev/null 2>&1; then
-  echo "[subctl] node is required (Node 22+). Install via 'brew install node@22'." >&2
-  exit 127
-fi
+DAEMON_LABEL="com.subctl.evy-v4"
+PLIST="${HOME}/Library/LaunchAgents/${DAEMON_LABEL}.plist"
+LOG_DIR="${HOME}/Library/Logs/subctl"
+LOG_OUT="${LOG_DIR}/evy-v4.log"
+LOG_ERR="${LOG_DIR}/evy-v4.err.log"
+HEALTH_URL="http://127.0.0.1:8797/health"
 
-if [[ ! -f "${BUNDLE}" ]]; then
-  echo "[subctl] bundle not found at ${BUNDLE}." >&2
-  echo "[subctl] run: (cd '${WORKSPACE_ROOT}/ui/chat-tui' && npm install && npm run build)" >&2
-  exit 1
-fi
+print_usage() {
+  cat <<EOF
+subctl — v4 chat with Evy.
 
-exec node "${BUNDLE}" "$@"
+Usage:
+  subctl                       launch the chat TUI (default)
+  subctl chat                  explicit alias
+  subctl daemon start          launchctl load ${DAEMON_LABEL}
+  subctl daemon stop           launchctl unload
+  subctl daemon restart        unload + load
+  subctl daemon status         loaded + /health snapshot
+  subctl health                curl /health, print result
+  subctl logs [--follow]       tail the daemon log
+  subctl version               print the TUI bundle version
+  subctl --help                show this help
+
+Inside the chat surface, type /help for slash commands.
+EOF
+}
+
+# `launchctl list | grep -q LABEL` runs into SIGPIPE under
+# `set -o pipefail` because grep -q exits before launchctl finishes
+# writing — the pipeline exit becomes 141, which the `if` reads as
+# false even when the match was found.  Capture the output first and
+# grep over the variable instead.
+is_daemon_loaded() {
+  local out
+  out="$(launchctl list 2>/dev/null || true)"
+  printf '%s\n' "${out}" | grep -q "${DAEMON_LABEL}"
+}
+
+cmd_chat() {
+  if ! command -v node >/dev/null 2>&1; then
+    echo "[subctl] node is required (Node 22+). Install via 'brew install node@22'." >&2
+    exit 127
+  fi
+  if [[ ! -f "${BUNDLE}" ]]; then
+    echo "[subctl] bundle not found at ${BUNDLE}." >&2
+    echo "[subctl] run: (cd '${WORKSPACE_ROOT}/ui/chat-tui' && npm install && npm run build)" >&2
+    exit 1
+  fi
+  exec node "${BUNDLE}" "$@"
+}
+
+cmd_daemon_start() {
+  if is_daemon_loaded; then
+    echo "[subctl] daemon already loaded (${DAEMON_LABEL})."
+  else
+    launchctl load "${PLIST}"
+    echo "[subctl] launchctl load ${PLIST} → ok"
+  fi
+}
+
+cmd_daemon_stop() {
+  if is_daemon_loaded; then
+    launchctl unload "${PLIST}"
+    echo "[subctl] launchctl unload ${PLIST} → ok"
+  else
+    echo "[subctl] daemon not loaded."
+  fi
+}
+
+cmd_daemon_status() {
+  if is_daemon_loaded; then
+    local line
+    line="$(launchctl list | grep "${DAEMON_LABEL}" || true)"
+    echo "[subctl] loaded: ${line}"
+  else
+    echo "[subctl] not loaded."
+  fi
+  if curl -fsS --max-time 2 "${HEALTH_URL}" 2>/dev/null; then
+    echo
+    echo "[subctl] /health ok"
+  else
+    echo "[subctl] /health unreachable"
+  fi
+}
+
+cmd_health() {
+  curl -fsS --max-time 2 "${HEALTH_URL}" && echo
+}
+
+cmd_logs() {
+  local follow=""
+  if [[ "${1:-}" == "--follow" || "${1:-}" == "-f" ]]; then
+    follow="-f"
+  fi
+  if [[ ! -f "${LOG_OUT}" ]]; then
+    echo "[subctl] log not found at ${LOG_OUT}." >&2
+    exit 1
+  fi
+  exec tail -n 200 ${follow} "${LOG_OUT}" "${LOG_ERR}"
+}
+
+cmd_version() {
+  if [[ ! -f "${BUNDLE}" ]]; then
+    echo "[subctl] bundle not built; run npm run build in ui/chat-tui."
+    exit 1
+  fi
+  node "${BUNDLE}" --version
+}
+
+case "${1:-}" in
+  ''|chat)
+    shift || true
+    cmd_chat "$@"
+    ;;
+  daemon)
+    case "${2:-}" in
+      start)   cmd_daemon_start ;;
+      stop)    cmd_daemon_stop ;;
+      restart) cmd_daemon_stop ; sleep 0.5 ; cmd_daemon_start ;;
+      status)  cmd_daemon_status ;;
+      *)
+        echo "[subctl] daemon subcommand: start | stop | restart | status" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  health)
+    cmd_health
+    ;;
+  logs)
+    shift
+    cmd_logs "$@"
+    ;;
+  version|--version|-V)
+    cmd_version
+    ;;
+  --help|-h|help)
+    print_usage
+    ;;
+  *)
+    print_usage >&2
+    exit 2
+    ;;
+esac
