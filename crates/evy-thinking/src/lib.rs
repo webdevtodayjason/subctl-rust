@@ -64,6 +64,7 @@
 
 pub mod anthropic;
 pub mod backend;
+pub mod codex;
 pub mod error;
 pub mod partner;
 pub mod session;
@@ -76,6 +77,10 @@ pub use anthropic::{
     DEFAULT_MODEL, DEFAULT_TIMEOUT,
 };
 pub use backend::LlmBackend;
+pub use codex::{
+    CodexOauthBackend, CodexOauthConfig, DEFAULT_CODEX_ENDPOINT, DEFAULT_CODEX_MAX_TOKENS,
+    DEFAULT_CODEX_MODEL, DEFAULT_CODEX_TIMEOUT,
+};
 pub use error::{Result, ThinkingError};
 pub use partner::{MessageHook, ThinkingPartner};
 pub use session::{Message, Role, Session, SessionId, SessionStatus};

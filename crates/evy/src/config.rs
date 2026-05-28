@@ -362,26 +362,67 @@ impl Default for SkillsConfig {
 /// backend. Absent → no chat endpoint is served (503).
 ///
 /// The backend selector is stringly-typed today (`"anthropic"` /
-/// `"stub"`) so the operator's TOML stays readable without a custom
-/// serde adapter. The daemon validates the value at boot.
+/// `"codex"` / `"stub"`) so the operator's TOML stays readable without
+/// a custom serde adapter. The daemon validates the value at boot.
+///
+/// # Choosing a backend
+///
+/// - `"anthropic"` — Anthropic Messages API with a paid `ANTHROPIC_API_KEY`.
+///   Operator pays per-token.
+/// - `"codex"` — Codex Responses API using the operator's existing
+///   ChatGPT Pro subscription via OAuth tokens minted by Phase 4
+///   Slice D's device-flow. Requires `[thinking_partner.codex]` with
+///   the account alias. **Preferred** for an operator who already has
+///   a ChatGPT Pro subscription.
+/// - `"stub"` — fixed-reply backend for smoke tests.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ThinkingPartnerSectionConfig {
-    /// Backend selector. Currently `"anthropic"` (production) or
-    /// `"stub"` (smoke tests; returns a fixed reply without calling
-    /// any API).
+    /// Backend selector. `"anthropic"` (paid API key), `"codex"`
+    /// (ChatGPT Pro OAuth), or `"stub"` (smoke tests).
     #[serde(default = "default_backend")]
     pub backend: String,
     /// Environment variable holding the Anthropic API key. Default
     /// `ANTHROPIC_API_KEY`. Only consulted when `backend = "anthropic"`.
     #[serde(default = "default_api_key_env")]
     pub api_key_env: String,
-    /// Optional model override (e.g. `"claude-sonnet-4-5"`). When
-    /// absent, the Anthropic backend's pinned default applies.
+    /// Optional model override (e.g. `"claude-sonnet-4-5"` for
+    /// anthropic, `"gpt-5.5"` for codex). When absent, the chosen
+    /// backend's pinned default applies.
     #[serde(default)]
     pub model: Option<String>,
     /// Optional `max_tokens` override sent on every request.
     #[serde(default)]
     pub max_tokens: Option<u32>,
+    /// `[thinking_partner.codex]` sub-section. Required when
+    /// `backend = "codex"`; ignored otherwise.
+    #[serde(default)]
+    pub codex: Option<CodexSectionConfig>,
+}
+
+/// `[thinking_partner.codex]` sub-table — points the Codex backend at
+/// the operator's existing OAuth bundle.
+///
+/// The tokens themselves live on disk: `accounts_conf_path` is the
+/// pipe-delimited roster (one row per provider/account), and the
+/// `auth.json` referenced by that row holds the actual JWT + refresh
+/// token. The Codex backend reads both lazily on every chat turn so a
+/// background `subctl auth codex` refresh is picked up without a daemon
+/// restart.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CodexSectionConfig {
+    /// Path to `accounts.conf`. Default
+    /// `~/.config/subctl/accounts.conf`. Operator typically leaves this
+    /// at the default — only override for parallel-test mode that
+    /// isolates v4 from v3 state.
+    #[serde(default = "default_accounts_conf_path")]
+    pub accounts_conf_path: PathBuf,
+    /// Which alias in `accounts.conf` to use (e.g. `openai-jason`).
+    pub account: String,
+    /// Override the Codex API endpoint. Default
+    /// `https://chatgpt.com/backend-api/codex`. Tests + dev setups
+    /// override this; production operators should leave it absent.
+    #[serde(default)]
+    pub endpoint: Option<String>,
 }
 
 fn default_backend() -> String {
@@ -390,6 +431,13 @@ fn default_backend() -> String {
 
 fn default_api_key_env() -> String {
     "ANTHROPIC_API_KEY".to_string()
+}
+
+fn default_accounts_conf_path() -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"));
+    home.join(".config").join("subctl").join("accounts.conf")
 }
 
 impl Config {
@@ -653,6 +701,77 @@ enabled = false
         let s = SkillsConfig::default();
         assert_eq!(s.directory, PathBuf::from("skills"));
         assert!(s.enabled);
+    }
+
+    #[test]
+    fn thinking_partner_codex_section_parses() {
+        let f = write_toml(
+            r#"
+[scheduler]
+db_path = "/tmp/evy.db"
+
+[policy]
+path = "/tmp/policy.toml"
+
+[providers]
+
+[thinking_partner]
+backend = "codex"
+model = "gpt-5.5"
+max_tokens = 2048
+
+[thinking_partner.codex]
+accounts_conf_path = "/tmp/test/accounts.conf"
+account = "openai-jason"
+endpoint = "https://chatgpt.com/backend-api/codex"
+"#,
+        );
+        let cfg = Config::load_from(f.path()).expect("parse");
+        let tp = cfg.thinking_partner.expect("thinking_partner present");
+        assert_eq!(tp.backend, "codex");
+        assert_eq!(tp.model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(tp.max_tokens, Some(2048));
+        let codex = tp.codex.expect("codex sub-section present");
+        assert_eq!(
+            codex.accounts_conf_path,
+            PathBuf::from("/tmp/test/accounts.conf")
+        );
+        assert_eq!(codex.account, "openai-jason");
+        assert_eq!(
+            codex.endpoint.as_deref(),
+            Some("https://chatgpt.com/backend-api/codex")
+        );
+    }
+
+    #[test]
+    fn thinking_partner_codex_endpoint_optional_and_accounts_conf_defaults() {
+        // Operator omits both the endpoint and the accounts.conf path
+        // — defaults must fill in, only `account` is mandatory.
+        let f = write_toml(
+            r#"
+[scheduler]
+db_path = "/tmp/evy.db"
+
+[policy]
+path = "/tmp/policy.toml"
+
+[providers]
+
+[thinking_partner]
+backend = "codex"
+
+[thinking_partner.codex]
+account = "openai-jason"
+"#,
+        );
+        let cfg = Config::load_from(f.path()).expect("parse");
+        let tp = cfg.thinking_partner.expect("thinking_partner present");
+        let codex = tp.codex.expect("codex sub-section present");
+        assert_eq!(codex.account, "openai-jason");
+        assert!(codex.endpoint.is_none());
+        // Default accounts.conf path lives under $HOME/.config/subctl.
+        // We don't assert the exact path because $HOME varies per CI.
+        assert!(codex.accounts_conf_path.ends_with("accounts.conf"));
     }
 
     #[test]

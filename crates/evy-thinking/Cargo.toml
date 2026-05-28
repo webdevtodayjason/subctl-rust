@@ -20,6 +20,12 @@ evy-core = { workspace = true }
 # `skill_view` tool call. See [`crate::anthropic`] for the wiring.
 evy-skills = { workspace = true }
 
+# Phase 6.0 follow-up — the CodexOauthBackend reaches into evy-providers
+# for the operator's existing on-disk OAuth tokens (AccountsStore +
+# CodexOauth::refresh). This is a one-way dependency (evy-providers
+# does NOT depend on evy-thinking).
+evy-providers = { workspace = true }
+
 # Async runtime — `Mutex` lives in `tokio::sync` because the sessions
 # guard is held across `.await` on the LLM HTTP call.
 tokio = { workspace = true }
@@ -49,6 +55,12 @@ uuid = { workspace = true }
 # Typed errors + logging.
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+# Phase 6.0 follow-up — the Codex backend decodes the JWT access token's
+# `chatgpt_account_id` claim to populate the `ChatGPT-Account-ID` header
+# (required by Cloudflare on chatgpt.com/backend-api/codex). Matches the
+# version evy-providers already pins.
+base64 = "0.22"
 
 [dev-dependencies]
 # Async test ergonomics + time travel for inactivity-timeout coverage.
