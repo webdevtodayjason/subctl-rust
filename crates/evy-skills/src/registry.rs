@@ -104,6 +104,58 @@ impl SkillRegistry {
     pub fn count(&self) -> usize {
         self.skills.len()
     }
+
+    /// Render the skills catalog as a system-prompt index block.
+    ///
+    /// The format is the **Hermes-style** mandatory-skills block: a
+    /// markdown header, load-bearing prose that instructs the model to
+    /// emit a `skill_view(name)` tool call whenever a listed skill is
+    /// even partially relevant, then a bullet list of `name: description`
+    /// rows. See `crates/evy-thinking/src/anthropic.rs` for the
+    /// consumer that injects this into the Anthropic `system` field and
+    /// handles the `skill_view` tool round-trip.
+    ///
+    /// Returns the empty string when the registry is empty — a header
+    /// with zero bullets would only confuse the model.
+    ///
+    /// ## Wording is load-bearing
+    ///
+    /// The instruction prose telling the LLM to call `skill_view` even
+    /// when it *thinks* it can handle the task is what triggers reliable
+    /// autoload (per the hermes-researcher findings under
+    /// `.subctl/docs/hermes-compact-and-skills-findings.md` §2.5). Do
+    /// not paraphrase this shorter without re-validating end-to-end —
+    /// the model defaults to *not* loading skills when the instruction
+    /// is soft.
+    #[must_use]
+    pub fn index_for_prompt(&self) -> String {
+        if self.skills.is_empty() {
+            return String::new();
+        }
+        let mut out = String::with_capacity(512 + self.skills.len() * 80);
+        out.push_str(
+            "## Skills (mandatory — load via skill_view when a skill applies)\n\
+\n\
+Before producing your response, scan the skills below. If any skill is \
+even partially relevant to the current request, you MUST call the \
+`skill_view` tool with the skill's name to load its full body — even \
+if you believe you could handle the task without loading the skill. \
+The skills below encode procedural knowledge you do not have by \
+default. Load first, then respond.\n\
+\n",
+        );
+        for skill in &self.skills {
+            // Description is allowed to be empty by the loader; render a
+            // bare bullet rather than `name: ` with a trailing colon, so
+            // the format stays scannable for the model.
+            if skill.description.is_empty() {
+                out.push_str(&format!("- {}\n", skill.name));
+            } else {
+                out.push_str(&format!("- {}: {}\n", skill.name, skill.description));
+            }
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -189,5 +241,28 @@ Bar body.
         write_skill(dir.path(), "broken", "---\ntriggers: [\"x\n---\n\nbody\n");
         let err = SkillRegistry::load(dir.path()).unwrap_err();
         assert!(err.to_string().contains("yaml"), "got `{err}`");
+    }
+
+    #[test]
+    fn index_for_prompt_empty_registry_returns_empty_string() {
+        let dir = tempdir().unwrap();
+        let reg = SkillRegistry::load(dir.path()).unwrap();
+        assert_eq!(reg.count(), 0);
+        assert_eq!(reg.index_for_prompt(), "");
+    }
+
+    #[test]
+    fn index_for_prompt_contains_header_and_bullets() {
+        let dir = tempdir().unwrap();
+        write_skill(dir.path(), "foo", FOO);
+        write_skill(dir.path(), "bar", BAR);
+        let reg = SkillRegistry::load(dir.path()).unwrap();
+        let idx = reg.index_for_prompt();
+        assert!(idx.starts_with("## Skills (mandatory"));
+        // Bullets sorted alphabetically because `load` sorts skills.
+        assert!(idx.contains("- bar: bar skill"));
+        assert!(idx.contains("- foo: foo skill"));
+        // Load-bearing prose must be present.
+        assert!(idx.contains("MUST call the `skill_view` tool"));
     }
 }
