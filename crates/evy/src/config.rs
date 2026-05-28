@@ -361,12 +361,24 @@ impl Default for SkillsConfig {
 /// `[thinking_partner]` table — wires the chat surface to an LLM
 /// backend. Absent → no chat endpoint is served (503).
 ///
-/// The backend selector is stringly-typed today (`"anthropic"` /
-/// `"stub"`) so the operator's TOML stays readable without a custom
-/// serde adapter. The daemon validates the value at boot.
+/// The backend selector is stringly-typed today (`"anthropic"`,
+/// `"lm-studio"`, or `"stub"`) so the operator's TOML stays readable
+/// without a custom serde adapter. The daemon validates the value at
+/// boot.
+///
+/// ## Recommended backends
+///
+/// - `"lm-studio"` — local OpenAI-compatible model (LM Studio binds
+///   `127.0.0.1:1234` by default). Free, fast, private, no API key
+///   required. Recommended default for lightweight operator chat.
+/// - `"anthropic"` — direct Anthropic Messages API. Highest quality;
+///   requires a paid API key in `ANTHROPIC_API_KEY` (or
+///   [`api_key_env`](Self::api_key_env)).
+/// - `"stub"` — fixed-reply stub for smoke tests; never touches a
+///   network.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ThinkingPartnerSectionConfig {
-    /// Backend selector. Currently `"anthropic"` (production) or
+    /// Backend selector. Currently `"anthropic"`, `"lm-studio"`, or
     /// `"stub"` (smoke tests; returns a fixed reply without calling
     /// any API).
     #[serde(default = "default_backend")]
@@ -375,13 +387,22 @@ pub struct ThinkingPartnerSectionConfig {
     /// `ANTHROPIC_API_KEY`. Only consulted when `backend = "anthropic"`.
     #[serde(default = "default_api_key_env")]
     pub api_key_env: String,
-    /// Optional model override (e.g. `"claude-sonnet-4-5"`). When
-    /// absent, the Anthropic backend's pinned default applies.
+    /// Optional model override. For `backend = "anthropic"` this is
+    /// e.g. `"claude-sonnet-4-5"`; for `backend = "lm-studio"` this is
+    /// the LM Studio model identifier (only required when multiple
+    /// models are loaded). When absent, each backend's default
+    /// applies.
     #[serde(default)]
     pub model: Option<String>,
     /// Optional `max_tokens` override sent on every request.
     #[serde(default)]
     pub max_tokens: Option<u32>,
+    /// Optional `[thinking_partner.lm_studio]` block — LM Studio
+    /// endpoint + temperature overrides. Only consulted when
+    /// `backend = "lm-studio"`; absent = backend defaults
+    /// (`http://127.0.0.1:1234`, temperature `0.7`).
+    #[serde(default)]
+    pub lm_studio: Option<LmStudioSectionConfig>,
 }
 
 fn default_backend() -> String {
@@ -390,6 +411,27 @@ fn default_backend() -> String {
 
 fn default_api_key_env() -> String {
     "ANTHROPIC_API_KEY".to_string()
+}
+
+/// On-disk shape for `[thinking_partner.lm_studio]`. Maps to
+/// [`evy_thinking::LmStudioConfig`] in [`crate::run_daemon`].
+///
+/// Each field is `#[serde(default)]` so an operator can author the
+/// block with only the field they're overriding (most commonly
+/// `endpoint` when LM Studio is bound on a non-default port). When the
+/// whole block is omitted, [`evy_thinking::LmStudioConfig::default`]
+/// applies — `127.0.0.1:1234`, no pinned model.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct LmStudioSectionConfig {
+    /// Base URL the daemon hits. Default
+    /// [`evy_thinking::DEFAULT_LM_STUDIO_ENDPOINT`]
+    /// (`http://127.0.0.1:1234`). Tests / non-default LM Studio
+    /// installs override this.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    /// Optional sampling temperature override. Default `0.7`.
+    #[serde(default)]
+    pub temperature: Option<f32>,
 }
 
 impl Config {
@@ -662,5 +704,62 @@ enabled = false
         assert_eq!(m.score_db, PathBuf::from("/tmp/evy-scores.db"));
         assert_eq!(m.preferences_db, PathBuf::from("/tmp/evy-preferences.db"));
         assert!(m.claude_mem_db.is_none());
+    }
+
+    #[test]
+    fn thinking_partner_with_lm_studio_backend_parses() {
+        let f = write_toml(
+            r#"
+[scheduler]
+db_path = "/tmp/evy.db"
+
+[policy]
+path = "/tmp/policy.toml"
+
+[providers]
+
+[thinking_partner]
+backend = "lm-studio"
+model = "gemma-4-26b-a4b-it-mlx"
+max_tokens = 1024
+
+[thinking_partner.lm_studio]
+endpoint = "http://127.0.0.1:9999"
+temperature = 0.3
+"#,
+        );
+        let cfg = Config::load_from(f.path()).expect("parse");
+        let tp = cfg.thinking_partner.expect("present");
+        assert_eq!(tp.backend, "lm-studio");
+        assert_eq!(tp.model.as_deref(), Some("gemma-4-26b-a4b-it-mlx"));
+        assert_eq!(tp.max_tokens, Some(1024));
+        let lm = tp.lm_studio.expect("lm_studio block present");
+        assert_eq!(lm.endpoint.as_deref(), Some("http://127.0.0.1:9999"));
+        assert_eq!(lm.temperature, Some(0.3));
+    }
+
+    #[test]
+    fn thinking_partner_with_lm_studio_backend_omitting_lm_studio_block_parses() {
+        // An operator who just wants the defaults (127.0.0.1:1234,
+        // temperature 0.7) shouldn't have to author the sub-block at
+        // all. Guard against accidentally making it required.
+        let f = write_toml(
+            r#"
+[scheduler]
+db_path = "/tmp/evy.db"
+
+[policy]
+path = "/tmp/policy.toml"
+
+[providers]
+
+[thinking_partner]
+backend = "lm-studio"
+"#,
+        );
+        let cfg = Config::load_from(f.path()).expect("parse");
+        let tp = cfg.thinking_partner.expect("present");
+        assert_eq!(tp.backend, "lm-studio");
+        assert!(tp.lm_studio.is_none());
     }
 }

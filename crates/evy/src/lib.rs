@@ -87,7 +87,9 @@ use evy_policy::{check_command_simple, load_policy, Mode};
 use evy_providers::{ClaudeCodeProvider, CodexProvider, DeepSeekProvider, HmacKey};
 use evy_scheduler::{Job, JobAction, JobId, RunOutcome, Scheduler};
 use evy_skills::SkillRegistry;
-use evy_thinking::{AnthropicBackend, AnthropicConfig, LlmBackend, ThinkingPartner};
+use evy_thinking::{
+    AnthropicBackend, AnthropicConfig, LlmBackend, LmStudioBackend, LmStudioConfig, ThinkingPartner,
+};
 use tokio::signal;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -693,9 +695,37 @@ async fn build_thinking_partner(
             }
             Arc::new(backend)
         }
+        "lm-studio" => {
+            // LM Studio binds 127.0.0.1:1234 by default, no auth. The
+            // [thinking_partner.lm_studio] block carries endpoint /
+            // temperature overrides; model + max_tokens fall through
+            // the parent [thinking_partner] keys so operators don't
+            // have to repeat them.
+            let mut lm_cfg = LmStudioConfig::default();
+            if let Some(section) = &cfg.lm_studio {
+                if let Some(ep) = &section.endpoint {
+                    lm_cfg.endpoint = ep.clone();
+                }
+                if let Some(temp) = section.temperature {
+                    lm_cfg.temperature = temp;
+                }
+            }
+            if let Some(model) = &cfg.model {
+                lm_cfg.model = Some(model.clone());
+            }
+            if let Some(mt) = cfg.max_tokens {
+                lm_cfg.max_tokens = mt;
+            }
+            // Skills autoload is Anthropic-only today (see lm_studio
+            // module docs) — `skills` is intentionally not consumed
+            // here; future work can add it once local-model tool-use
+            // is reliable.
+            let _ = skills;
+            Arc::new(LmStudioBackend::new(lm_cfg))
+        }
         "stub" => Arc::new(StubBackend),
         other => anyhow::bail!(
-            "thinking-partner: unknown backend {other:?} (expected \"anthropic\" or \"stub\")"
+            "thinking-partner: unknown backend {other:?} (expected \"anthropic\", \"lm-studio\", or \"stub\")"
         ),
     };
     let partner = ThinkingPartner::new(backend);
