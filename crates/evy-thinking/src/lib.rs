@@ -64,6 +64,7 @@
 
 pub mod anthropic;
 pub mod backend;
+pub mod codex;
 pub mod error;
 pub mod lm_studio;
 pub mod partner;
@@ -77,6 +78,10 @@ pub use anthropic::{
     DEFAULT_MODEL, DEFAULT_TIMEOUT,
 };
 pub use backend::LlmBackend;
+pub use codex::{
+    CodexOauthBackend, CodexOauthConfig, DEFAULT_CODEX_ENDPOINT, DEFAULT_CODEX_MAX_TOKENS,
+    DEFAULT_CODEX_MODEL, DEFAULT_CODEX_TIMEOUT,
+};
 pub use error::{Result, ThinkingError};
 pub use lm_studio::{
     LmStudioBackend, LmStudioConfig, DEFAULT_LM_STUDIO_ENDPOINT,

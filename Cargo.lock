@@ -965,8 +965,10 @@ name = "evy-thinking"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64",
  "chrono",
  "evy-core",
+ "evy-providers",
  "evy-skills",
  "reqwest",
  "serde",

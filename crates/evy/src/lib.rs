@@ -88,7 +88,8 @@ use evy_providers::{ClaudeCodeProvider, CodexProvider, DeepSeekProvider, HmacKey
 use evy_scheduler::{Job, JobAction, JobId, RunOutcome, Scheduler};
 use evy_skills::SkillRegistry;
 use evy_thinking::{
-    AnthropicBackend, AnthropicConfig, LlmBackend, LmStudioBackend, LmStudioConfig, ThinkingPartner,
+    AnthropicBackend, AnthropicConfig, CodexOauthBackend, CodexOauthConfig, LlmBackend,
+    LmStudioBackend, LmStudioConfig, ThinkingPartner,
 };
 use tokio::signal;
 use tokio::sync::oneshot;
@@ -723,9 +724,42 @@ async fn build_thinking_partner(
             let _ = skills;
             Arc::new(LmStudioBackend::new(lm_cfg))
         }
+        "codex" => {
+            // Codex OAuth — reuses tokens minted by `subctl auth codex`
+            // (Phase 4 Slice D's device-flow). No env-var lookup; the
+            // bundle lives in `<config_dir>/auth.json` as referenced by
+            // `accounts.conf`.
+            let codex_cfg = cfg.codex.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "thinking-partner: backend = \"codex\" requires a [thinking_partner.codex] section with `account = ...`"
+                )
+            })?;
+            if codex_cfg.account.trim().is_empty() {
+                anyhow::bail!(
+                    "thinking-partner: [thinking_partner.codex].account is empty"
+                );
+            }
+            let mut backend_cfg = CodexOauthConfig::new(codex_cfg.account.clone());
+            backend_cfg.accounts_conf_path = codex_cfg.accounts_conf_path.clone();
+            if let Some(model) = &cfg.model {
+                backend_cfg.model = model.clone();
+            }
+            if let Some(mt) = cfg.max_tokens {
+                backend_cfg.max_tokens = mt;
+            }
+            if let Some(ep) = &codex_cfg.endpoint {
+                backend_cfg.endpoint = ep.clone();
+            }
+            let mut backend = CodexOauthBackend::new(backend_cfg)
+                .context("constructing CodexOauthBackend")?;
+            if let Some(reg) = skills {
+                backend = backend.with_skills(reg);
+            }
+            Arc::new(backend)
+        }
         "stub" => Arc::new(StubBackend),
         other => anyhow::bail!(
-            "thinking-partner: unknown backend {other:?} (expected \"anthropic\", \"lm-studio\", or \"stub\")"
+            "thinking-partner: unknown backend {other:?} (expected \"anthropic\", \"lm-studio\", \"codex\", or \"stub\")"
         ),
     };
     let partner = ThinkingPartner::new(backend);

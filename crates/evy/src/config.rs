@@ -361,26 +361,30 @@ impl Default for SkillsConfig {
 /// `[thinking_partner]` table — wires the chat surface to an LLM
 /// backend. Absent → no chat endpoint is served (503).
 ///
-/// The backend selector is stringly-typed today (`"anthropic"`,
-/// `"lm-studio"`, or `"stub"`) so the operator's TOML stays readable
-/// without a custom serde adapter. The daemon validates the value at
-/// boot.
+/// The backend selector is stringly-typed today (`"lm-studio"`,
+/// `"codex"`, `"anthropic"`, or `"stub"`) so the operator's TOML stays
+/// readable without a custom serde adapter. The daemon validates the
+/// value at boot.
 ///
-/// ## Recommended backends
+/// # Choosing a backend
 ///
 /// - `"lm-studio"` — local OpenAI-compatible model (LM Studio binds
 ///   `127.0.0.1:1234` by default). Free, fast, private, no API key
-///   required. Recommended default for lightweight operator chat.
+///   required. **Recommended default** for lightweight operator chat.
+/// - `"codex"` — Codex Responses API using the operator's existing
+///   ChatGPT Pro subscription via OAuth tokens minted by Phase 4
+///   Slice D's device-flow. Requires `[thinking_partner.codex]` with
+///   the account alias. **Preferred** when more reasoning power is
+///   needed without a separate API key purchase.
 /// - `"anthropic"` — direct Anthropic Messages API. Highest quality;
-///   requires a paid API key in `ANTHROPIC_API_KEY` (or
-///   [`api_key_env`](Self::api_key_env)).
-/// - `"stub"` — fixed-reply stub for smoke tests; never touches a
+///   requires a paid `ANTHROPIC_API_KEY` (or whatever
+///   [`api_key_env`](Self::api_key_env) names).
+/// - `"stub"` — fixed-reply backend for smoke tests; never touches a
 ///   network.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ThinkingPartnerSectionConfig {
-    /// Backend selector. Currently `"anthropic"`, `"lm-studio"`, or
-    /// `"stub"` (smoke tests; returns a fixed reply without calling
-    /// any API).
+    /// Backend selector. `"lm-studio"` (local), `"codex"` (ChatGPT Pro
+    /// OAuth), `"anthropic"` (paid API key), or `"stub"` (smoke tests).
     #[serde(default = "default_backend")]
     pub backend: String,
     /// Environment variable holding the Anthropic API key. Default
@@ -388,10 +392,11 @@ pub struct ThinkingPartnerSectionConfig {
     #[serde(default = "default_api_key_env")]
     pub api_key_env: String,
     /// Optional model override. For `backend = "anthropic"` this is
-    /// e.g. `"claude-sonnet-4-5"`; for `backend = "lm-studio"` this is
-    /// the LM Studio model identifier (only required when multiple
-    /// models are loaded). When absent, each backend's default
-    /// applies.
+    /// e.g. `"claude-sonnet-4-5"`; for `backend = "codex"` this is the
+    /// Codex model ID (e.g. `"gpt-5.5"`); for `backend = "lm-studio"`
+    /// this is the LM Studio model identifier (only required when
+    /// multiple models are loaded). When absent, each backend's pinned
+    /// default applies.
     #[serde(default)]
     pub model: Option<String>,
     /// Optional `max_tokens` override sent on every request.
@@ -403,6 +408,36 @@ pub struct ThinkingPartnerSectionConfig {
     /// (`http://127.0.0.1:1234`, temperature `0.7`).
     #[serde(default)]
     pub lm_studio: Option<LmStudioSectionConfig>,
+    /// `[thinking_partner.codex]` sub-section. Required when
+    /// `backend = "codex"`; ignored otherwise.
+    #[serde(default)]
+    pub codex: Option<CodexSectionConfig>,
+}
+
+/// `[thinking_partner.codex]` sub-table — points the Codex backend at
+/// the operator's existing OAuth bundle.
+///
+/// The tokens themselves live on disk: `accounts_conf_path` is the
+/// pipe-delimited roster (one row per provider/account), and the
+/// `auth.json` referenced by that row holds the actual JWT + refresh
+/// token. The Codex backend reads both lazily on every chat turn so a
+/// background `subctl auth codex` refresh is picked up without a daemon
+/// restart.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CodexSectionConfig {
+    /// Path to `accounts.conf`. Default
+    /// `~/.config/subctl/accounts.conf`. Operator typically leaves this
+    /// at the default — only override for parallel-test mode that
+    /// isolates v4 from v3 state.
+    #[serde(default = "default_accounts_conf_path")]
+    pub accounts_conf_path: PathBuf,
+    /// Which alias in `accounts.conf` to use (e.g. `openai-jason`).
+    pub account: String,
+    /// Override the Codex API endpoint. Default
+    /// `https://chatgpt.com/backend-api/codex`. Tests + dev setups
+    /// override this; production operators should leave it absent.
+    #[serde(default)]
+    pub endpoint: Option<String>,
 }
 
 fn default_backend() -> String {
@@ -432,6 +467,13 @@ pub struct LmStudioSectionConfig {
     /// Optional sampling temperature override. Default `0.7`.
     #[serde(default)]
     pub temperature: Option<f32>,
+}
+
+fn default_accounts_conf_path() -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"));
+    home.join(".config").join("subctl").join("accounts.conf")
 }
 
 impl Config {
@@ -695,6 +737,77 @@ enabled = false
         let s = SkillsConfig::default();
         assert_eq!(s.directory, PathBuf::from("skills"));
         assert!(s.enabled);
+    }
+
+    #[test]
+    fn thinking_partner_codex_section_parses() {
+        let f = write_toml(
+            r#"
+[scheduler]
+db_path = "/tmp/evy.db"
+
+[policy]
+path = "/tmp/policy.toml"
+
+[providers]
+
+[thinking_partner]
+backend = "codex"
+model = "gpt-5.5"
+max_tokens = 2048
+
+[thinking_partner.codex]
+accounts_conf_path = "/tmp/test/accounts.conf"
+account = "openai-jason"
+endpoint = "https://chatgpt.com/backend-api/codex"
+"#,
+        );
+        let cfg = Config::load_from(f.path()).expect("parse");
+        let tp = cfg.thinking_partner.expect("thinking_partner present");
+        assert_eq!(tp.backend, "codex");
+        assert_eq!(tp.model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(tp.max_tokens, Some(2048));
+        let codex = tp.codex.expect("codex sub-section present");
+        assert_eq!(
+            codex.accounts_conf_path,
+            PathBuf::from("/tmp/test/accounts.conf")
+        );
+        assert_eq!(codex.account, "openai-jason");
+        assert_eq!(
+            codex.endpoint.as_deref(),
+            Some("https://chatgpt.com/backend-api/codex")
+        );
+    }
+
+    #[test]
+    fn thinking_partner_codex_endpoint_optional_and_accounts_conf_defaults() {
+        // Operator omits both the endpoint and the accounts.conf path
+        // — defaults must fill in, only `account` is mandatory.
+        let f = write_toml(
+            r#"
+[scheduler]
+db_path = "/tmp/evy.db"
+
+[policy]
+path = "/tmp/policy.toml"
+
+[providers]
+
+[thinking_partner]
+backend = "codex"
+
+[thinking_partner.codex]
+account = "openai-jason"
+"#,
+        );
+        let cfg = Config::load_from(f.path()).expect("parse");
+        let tp = cfg.thinking_partner.expect("thinking_partner present");
+        let codex = tp.codex.expect("codex sub-section present");
+        assert_eq!(codex.account, "openai-jason");
+        assert!(codex.endpoint.is_none());
+        // Default accounts.conf path lives under $HOME/.config/subctl.
+        // We don't assert the exact path because $HOME varies per CI.
+        assert!(codex.accounts_conf_path.ends_with("accounts.conf"));
     }
 
     #[test]
