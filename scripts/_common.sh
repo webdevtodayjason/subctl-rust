@@ -44,6 +44,13 @@ fi
 # etc. before invoking install.sh; we won't clobber.
 : "${SUBCTL_PREFIX:=$HOME/.local/lib/subctl-rust}"
 : "${SUBCTL_BIN:=$SUBCTL_PREFIX/evy}"
+# Ink TUI bundle lives next to the daemon binary, under $SUBCTL_PREFIX.
+: "${SUBCTL_INK_BUNDLE_DIR:=$SUBCTL_PREFIX/ui}"
+: "${SUBCTL_INK_BUNDLE_PATH:=$SUBCTL_INK_BUNDLE_DIR/bundle.js}"
+# User-facing launchers (subctl + evy alias) drop into the operator's PATH.
+: "${SUBCTL_USER_BIN_DIR:=$HOME/.local/bin}"
+: "${SUBCTL_USER_BIN_SUBCTL:=$SUBCTL_USER_BIN_DIR/subctl}"
+: "${SUBCTL_USER_BIN_EVY:=$SUBCTL_USER_BIN_DIR/evy}"
 # v4 lives in its OWN config subdir to avoid collisions with v3's state
 # at $HOME/.config/subctl/ (config.toml, accounts.conf, cognee.json, evy/, …).
 # Parallel-test mode: both v3 and v4 daemons can run simultaneously
@@ -67,4 +74,6 @@ fi
 export SUBCTL_PREFIX SUBCTL_BIN SUBCTL_CONFIG_DIR SUBCTL_CONFIG_PATH \
        SUBCTL_SKILLS_DIR SUBCTL_LOG_DIR SUBCTL_PLIST_LABEL \
        SUBCTL_PLIST_PATH SUBCTL_V3_LABEL SUBCTL_V3_PLIST \
-       SUBCTL_HEALTH_URL SUBCTL_RUST_ROOT
+       SUBCTL_HEALTH_URL SUBCTL_RUST_ROOT \
+       SUBCTL_INK_BUNDLE_DIR SUBCTL_INK_BUNDLE_PATH \
+       SUBCTL_USER_BIN_DIR SUBCTL_USER_BIN_SUBCTL SUBCTL_USER_BIN_EVY

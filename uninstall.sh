@@ -70,7 +70,9 @@ subctl_step "Evy v4 uninstall plan"
 cat >&2 <<EOF
 
   Plist file   → $SUBCTL_PLIST_PATH  (will REMOVE)
-  Binary       → $SUBCTL_PREFIX       (will REMOVE)
+  Binary       → $SUBCTL_PREFIX       (will REMOVE — includes ui/ bundle)
+  Launchers    → $SUBCTL_USER_BIN_SUBCTL  (will REMOVE)
+               → $SUBCTL_USER_BIN_EVY     (will REMOVE — symlink)
 
 EOF
 
@@ -130,7 +132,26 @@ else
   subctl_info "no binary tree at $SUBCTL_PREFIX — already gone"
 fi
 
-# ── 3. purge (optional) ────────────────────────────────────────────────────
+# ── 3. remove user-PATH launchers (subctl + evy symlink) ──────────────────
+subctl_step "remove launchers"
+for launcher in "$SUBCTL_USER_BIN_SUBCTL" "$SUBCTL_USER_BIN_EVY"; do
+  if [ -e "$launcher" ] || [ -L "$launcher" ]; then
+    # Safety: only remove paths we control under $HOME/.local/bin/.
+    case "$launcher" in
+      "$HOME"/.local/bin/subctl|"$HOME"/.local/bin/evy)
+        run "rm -f '$launcher'"
+        subctl_ok "launcher removed: $launcher"
+        ;;
+      *)
+        subctl_err "refusing to rm '$launcher' (path not under \$HOME/.local/bin/)"
+        ;;
+    esac
+  else
+    subctl_info "no launcher at $launcher — already gone"
+  fi
+done
+
+# ── 4. purge (optional) ────────────────────────────────────────────────────
 if [ "$PURGE" = "true" ]; then
   subctl_step "purge: config + logs"
   if ! confirm "Really delete $SUBCTL_CONFIG_DIR and v4 logs?"; then

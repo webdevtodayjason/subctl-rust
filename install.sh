@@ -81,6 +81,8 @@ print_plan() {
 ${SUBCTL_C_BLU}═══ Evy v4 install plan ═══${SUBCTL_C_RST}
 
   Binary       → $SUBCTL_BIN
+  Ink bundle   → $SUBCTL_INK_BUNDLE_PATH
+  User launchers → $SUBCTL_USER_BIN_SUBCTL  (+ evy symlink)
   Config       → $SUBCTL_CONFIG_PATH
   Skills dir   → $SUBCTL_SKILLS_DIR
   Log dir      → $SUBCTL_LOG_DIR
@@ -129,6 +131,9 @@ main() {
 
   subctl_step "install: config"
   bash "$SUBCTL_RUST_ROOT/scripts/install_config.sh" || exit 1
+
+  subctl_step "install: ink TUI"
+  bash "$SUBCTL_RUST_ROOT/scripts/install_ink_tui.sh" || exit 1
 
   subctl_step "install: plist"
   bash "$SUBCTL_RUST_ROOT/scripts/install_plist.sh" || exit 1
