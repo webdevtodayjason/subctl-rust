@@ -69,6 +69,15 @@ fi
 # ── stage: bundle → $SUBCTL_INK_BUNDLE_DIR/bundle.js ───────────────────────
 run "mkdir -p '$SUBCTL_INK_BUNDLE_DIR'"
 run "install -m 0644 '$SRC_BUNDLE' '$SUBCTL_INK_BUNDLE_PATH'"
+# Drop a minimal package.json next to the bundle so Node treats the
+# emitted ESM-flavored output as a module without reparsing-warning
+# noise on every launch.
+PACKAGE_JSON_PATH="$SUBCTL_INK_BUNDLE_DIR/package.json"
+if [ "${DRY_RUN:-false}" = "true" ]; then
+  subctl_info "[dry-run] would write $PACKAGE_JSON_PATH ({\"type\":\"module\"})"
+else
+  printf '{"type":"module","private":true}\n' > "$PACKAGE_JSON_PATH"
+fi
 subctl_ok "bundle staged: $SUBCTL_INK_BUNDLE_PATH"
 
 # ── stage: launcher with rewritten BUNDLE path ─────────────────────────────
