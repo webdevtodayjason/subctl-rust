@@ -10,6 +10,7 @@
 //! added without breaking existing watchdogs or readers.
 
 use chrono::{DateTime, Utc};
+use evy_core::WorkerId;
 use serde::{Deserialize, Serialize};
 
 /// A single thing a watchdog noticed while ticking.
@@ -41,6 +42,44 @@ pub enum Finding {
     PrunedSession {
         /// Session name that was removed from in-memory tracking.
         session: String,
+    },
+
+    /// Auto-nudge dispatched a status-check directive to a stuck worker.
+    /// `attempts` is the running count for *this* worker since it last
+    /// produced output — escalation to [`Finding::WorkerDead`] fires when
+    /// `attempts` reaches the configured threshold.
+    WorkerNudged {
+        /// Worker that received the nudge.
+        worker_id: WorkerId,
+        /// Cumulative nudge count for this worker in the current
+        /// stale window. Resets to zero on any observed output change.
+        attempts: u32,
+    },
+
+    /// Auto-nudge escalated a worker that exhausted its nudge budget
+    /// without producing fresh output. Terminal for this worker — the
+    /// watchdog drops it from its nudge history.
+    WorkerDead {
+        /// Worker that exhausted its nudge budget.
+        worker_id: WorkerId,
+        /// Timestamp of the worker's last observed activity, surfaced
+        /// in the operator notification so the alert body shows
+        /// "silent for N min".
+        last_activity: DateTime<Utc>,
+    },
+
+    /// Team-staleness flagged a registered team whose most-recent
+    /// activity exceeded the staleness threshold. Distinct from
+    /// [`Finding::DeadTeam`] — `StaleTeam` keeps the team in the
+    /// registry; it's the operator-facing "I dispatched a team but
+    /// nothing's happening" canary.
+    StaleTeam {
+        /// Team name (`TeamRecord.team_id` from the registry).
+        team_name: String,
+        /// Last activity timestamp from the team registry. Absent
+        /// `last_activity` is folded to the team's effective "born at"
+        /// before reaching this finding.
+        last_activity: DateTime<Utc>,
     },
 
     /// No problem found this tick. Emitted instead of an empty findings
@@ -129,6 +168,18 @@ mod tests {
             Finding::PrunedSession {
                 session: "ghost-session".into(),
             },
+            Finding::WorkerNudged {
+                worker_id: WorkerId::new(),
+                attempts: 2,
+            },
+            Finding::WorkerDead {
+                worker_id: WorkerId::new(),
+                last_activity: Utc::now(),
+            },
+            Finding::StaleTeam {
+                team_name: "claude-quiet".into(),
+                last_activity: Utc::now(),
+            },
             Finding::Healthy,
         ];
         for f in cases {
@@ -136,6 +187,33 @@ mod tests {
             let back: Finding = serde_json::from_str(&s).expect("deserialize");
             assert_eq!(f, back);
         }
+    }
+
+    #[test]
+    fn phase5_finding_tags_are_snake_case() {
+        // Dashboard / SSE consumers match on the `"finding"` tag string;
+        // lock the spelling in so a rename can't break readers silently.
+        let nudged = Finding::WorkerNudged {
+            worker_id: WorkerId::new(),
+            attempts: 1,
+        };
+        let dead = Finding::WorkerDead {
+            worker_id: WorkerId::new(),
+            last_activity: Utc::now(),
+        };
+        let stale = Finding::StaleTeam {
+            team_name: "claude-quiet".into(),
+            last_activity: Utc::now(),
+        };
+        assert!(serde_json::to_string(&nudged)
+            .unwrap()
+            .contains("\"finding\":\"worker_nudged\""),);
+        assert!(serde_json::to_string(&dead)
+            .unwrap()
+            .contains("\"finding\":\"worker_dead\""),);
+        assert!(serde_json::to_string(&stale)
+            .unwrap()
+            .contains("\"finding\":\"stale_team\""),);
     }
 
     #[test]
