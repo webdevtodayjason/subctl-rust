@@ -112,16 +112,51 @@ function drainTokenBuffer(): void {
   }
 }
 
-export function recordSkillLoaded(name: string): void {
-  const state = $transcript.get()
-  if (state.liveSkills.includes(name)) {
+// The daemon emits a skill_loaded frame for every registered skill at the
+// start of a turn (~100 in production), so per-event $transcript.set fires
+// ~100 React re-renders before the first token arrives.  Mirror the
+// 16ms token-batching pattern: collect names into a Set, flush in one set.
+let _skillBuf: Set<string> = new Set()
+let _skillTimer: NodeJS.Timeout | null = null
+
+function flushSkills(): void {
+  if (_skillBuf.size === 0) {
+    _skillTimer = null
     return
   }
-  $transcript.set({ ...state, liveSkills: [...state.liveSkills, name] })
+  const state = $transcript.get()
+  const merged = state.liveSkills.slice()
+  for (const name of _skillBuf) {
+    if (!merged.includes(name)) {
+      merged.push(name)
+    }
+  }
+  $transcript.set({ ...state, liveSkills: merged })
+  _skillBuf = new Set()
+  _skillTimer = null
+}
+
+export function recordSkillLoaded(name: string): void {
+  _skillBuf.add(name)
+  if (_skillTimer === null) {
+    _skillTimer = setTimeout(flushSkills, STREAM_BATCH_MS)
+  }
+}
+
+/** Force-drain the skill buffer alongside the token buffer at turn end. */
+function drainSkillBuffer(): void {
+  if (_skillTimer !== null) {
+    clearTimeout(_skillTimer)
+    _skillTimer = null
+  }
+  if (_skillBuf.size > 0) {
+    flushSkills()
+  }
 }
 
 export function completeAssistantTurn(sessionId: string): void {
   drainTokenBuffer()
+  drainSkillBuffer()
   const state = $transcript.get()
   const text = state.streaming
   const skillsLoaded = state.liveSkills
@@ -144,6 +179,7 @@ export function completeAssistantTurn(sessionId: string): void {
 
 export function failAssistantTurn(message: string): void {
   drainTokenBuffer()
+  drainSkillBuffer()
   const state = $transcript.get()
   // Roll back the streaming buffer; surface the error as a system msg so
   // it remains visible across turns.

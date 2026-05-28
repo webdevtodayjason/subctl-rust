@@ -144,6 +144,13 @@ export function Composer(props: ComposerProps): React.ReactElement {
           setCursor((c) => c) // \ removed, \n added → same length
           return
         }
+        // Don't fire a second turn while one is in flight — Enter is
+        // suppressed during streaming so the operator's draft stays in
+        // the buffer for after the current reply finishes.  Ctrl+C is
+        // the documented escape hatch (placeholder advertises it).
+        if (disabled) {
+          return
+        }
         submit()
         return
       }

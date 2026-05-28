@@ -58,6 +58,10 @@ the Ink renderer needs a TTY for raw-mode keyboard input. Piping into
 11. Relaunch, type `/clear` → resets, session: — again
 12. Ctrl+C with empty buffer → exits; with text → clears draft;
     mid-stream → interrupts
+13. Enter pressed mid-stream → NO second turn fires; the buffer keeps
+    growing for the next submit (verify by typing during a slow reply)
+14. Heavy skill-flood: send a fresh message → spinner shows once, no
+    "loaded N skill / loaded N+1 skill" churn
 
 ## Layout (planned)
 
