@@ -77,7 +77,7 @@ pub use anthropic::{
     AnthropicBackend, AnthropicConfig, DEFAULT_ANTHROPIC_API_BASE, DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL, DEFAULT_TIMEOUT,
 };
-pub use backend::LlmBackend;
+pub use backend::{LlmBackend, StreamChunk};
 pub use codex::{
     CodexOauthBackend, CodexOauthConfig, DEFAULT_CODEX_ENDPOINT, DEFAULT_CODEX_MAX_TOKENS,
     DEFAULT_CODEX_MODEL, DEFAULT_CODEX_TIMEOUT,

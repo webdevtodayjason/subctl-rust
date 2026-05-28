@@ -53,16 +53,25 @@
 //! [`ThinkingPartner::start_session`]: evy_thinking::ThinkingPartner::start_session
 //! [`ThinkingPartner::send`]: evy_thinking::ThinkingPartner::send
 
+use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     extract::State,
-    http::StatusCode,
-    response::{IntoResponse, Json, Response},
+    http::{HeaderMap, StatusCode},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Json, Response,
+    },
 };
 use evy_skills::SkillRegistry;
-use evy_thinking::{Role, SessionId, SessionStatus, ThinkingError};
+use evy_thinking::{Role, SessionId, SessionStatus, StreamChunk, ThinkingError, ThinkingPartner};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::StreamExt;
 use uuid::Uuid;
 
 use crate::http::HttpState;
@@ -188,21 +197,100 @@ fn skills_index(skills: Option<&Arc<SkillRegistry>>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// POST `/api/evy/chat` handler. Reads `state.app.thinking_partner()`;
-/// if `None` returns 503. Otherwise dispatches to start/send and shapes
-/// the response.
+/// SSE wire variants carried by `data:` frames when the operator
+/// requests streaming. Each variant becomes one SSE `data: {...}` line
+/// followed by a blank-line separator, per the EventSource protocol.
+///
+/// | Variant | Wire shape | Emitted when |
+/// |---------|------------|--------------|
+/// | `Token` | `{"kind":"token","content":"H"}` | every backend delta |
+/// | `SkillLoaded` | `{"kind":"skill_loaded","name":"plan"}` | backend autoloaded a skill |
+/// | `Done` | `{"kind":"done","session_id":"<uuid>"}` | end of stream, success |
+/// | `Error` | `{"kind":"error","message":"..."}` | end of stream, failure |
+///
+/// `Done` is always the last frame on a successful stream; `Error` is
+/// always the last frame on a failed stream. The TUI keeps reading until
+/// one of those arrives or the connection closes.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ChatStreamEvent {
+    /// Next slice of assistant text.
+    Token {
+        /// Concatenate every `Token` frame in order to reconstruct the
+        /// full reply.
+        content: String,
+    },
+    /// Backend autoloaded a skill from the registry.
+    SkillLoaded {
+        /// Skill name as listed in `GET /api/evy/skills`.
+        name: String,
+    },
+    /// End of stream — partner reply assembled successfully.
+    Done {
+        /// Session id the reply belongs to. Echoes back the client-
+        /// supplied id on `send`, or a freshly minted one on
+        /// `start_session`.
+        session_id: Uuid,
+    },
+    /// End of stream — backend or partner failure. The outer `kind`
+    /// tag is `"error"`; the inner `error_kind` field carries the
+    /// underlying [`ChatError`] discriminator so the TUI can branch on
+    /// failure mode (e.g. `"unavailable"` vs `"backend"`).
+    Error {
+        /// Inner `ChatError` discriminator (e.g. `"unavailable"`,
+        /// `"unknown_session"`, `"backend"`).
+        error_kind: String,
+        /// Human-readable description.
+        message: String,
+    },
+}
+
+/// True when the request's `Accept` header opts into SSE streaming.
+///
+/// We accept `text/event-stream` exactly or as a comma-separated
+/// component of a wider Accept list. Quality parameters (`;q=0.8`) are
+/// not parsed — the TUI sends an unambiguous header.
+fn wants_event_stream(headers: &HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .map(|h| {
+            h.split(',')
+                .any(|part| part.trim().eq_ignore_ascii_case("text/event-stream"))
+        })
+        .unwrap_or(false)
+}
+
+/// POST `/api/evy/chat` handler — content-negotiates between blocking
+/// JSON (default) and `text/event-stream` (when `Accept` opts in).
 ///
 /// `pub(crate)` because the handler signature carries the crate-private
 /// `HttpState`; only `crate::http::build_router` references it. The
 /// public surface of the module is the request/response types and the
-/// `ChatError` enum, which downstream consumers (e.g. the chat TUI
+/// [`ChatError`] enum, which downstream consumers (e.g. the chat TUI
 /// crate's wire shapes) re-derive structurally.
 ///
 /// # Errors
-/// Surfaced via [`ChatError`] → status code; see module docs.
+/// In the blocking path: surfaced via [`ChatError`] → status code; see
+/// module docs. In the streaming path: surfaced inline as
+/// [`ChatStreamEvent::Error`] frames so the HTTP status stays 200 once
+/// headers are flushed.
 pub(crate) async fn chat_handler(
     State(state): State<HttpState>,
+    headers: HeaderMap,
     Json(body): Json<ChatRequest>,
+) -> Response {
+    if wants_event_stream(&headers) {
+        chat_handler_streaming(state, body).await.into_response()
+    } else {
+        chat_handler_blocking(state, body).await.into_response()
+    }
+}
+
+/// Blocking JSON branch — the original Phase 6 behaviour, unchanged.
+async fn chat_handler_blocking(
+    state: HttpState,
+    body: ChatRequest,
 ) -> std::result::Result<Json<ChatResponse>, ChatError> {
     let partner = state
         .app
@@ -268,6 +356,218 @@ pub(crate) async fn chat_handler(
         response: response_text,
         skills_loaded: skills_index(skills.as_ref()),
     }))
+}
+
+/// Streaming branch. Spawns a worker task that drives
+/// [`ThinkingPartner::stream_send`] / [`ThinkingPartner::stream_start_session`]
+/// into an `mpsc::Sender<StreamChunk>`; the receiver side is converted
+/// into an axum SSE stream so the operator's TUI renders tokens as they
+/// arrive.
+///
+/// Failure modes are surfaced inline as
+/// [`ChatStreamEvent::Error`] frames once headers are flushed (the wire
+/// status is 200). Failures detected *before* the worker spawns
+/// (missing partner, empty message) are surfaced as a tiny SSE stream
+/// carrying a single `Error` frame and immediately closed — the wire
+/// status is still 200 to keep the EventSource client's reconnect logic
+/// from firing.
+async fn chat_handler_streaming(
+    state: HttpState,
+    body: ChatRequest,
+) -> Sse<impl futures::Stream<Item = std::result::Result<Event, Infallible>>> {
+    /// Capacity for the partner → handler chunk channel. 64 is wide
+    /// enough that a fast backend doesn't back-pressure on the SSE
+    /// flush, narrow enough that a slow client surfaces quickly.
+    const CHUNK_BUFFER: usize = 64;
+
+    // We always return an `Sse` — even when the request fails
+    // validation, in which case we emit one Error frame and close.
+    let (tx, rx) = mpsc::channel::<ChatStreamEvent>(CHUNK_BUFFER);
+
+    let skills = state.app.skills();
+
+    // Validate before spawning the worker so we don't spin up a task
+    // just to fail. `match` keeps clippy happy about not double-checking
+    // the Option's variant.
+    let msg = body.message.trim().to_string();
+    let session_id = body.session_id;
+    match (state.app.thinking_partner(), msg.is_empty()) {
+        (None, _) => {
+            emit_error(
+                &tx,
+                ChatError::Unavailable {
+                    message: "thinking-partner is not configured for this daemon".to_string(),
+                },
+            )
+            .await;
+        }
+        (Some(_), true) => {
+            emit_error(
+                &tx,
+                ChatError::BadRequest {
+                    message: "message must be non-empty".to_string(),
+                },
+            )
+            .await;
+        }
+        (Some(partner), false) => {
+            let skill_names = skills_index(skills.as_ref());
+            tokio::spawn(stream_worker(
+                partner,
+                session_id,
+                msg,
+                skill_names,
+                tx.clone(),
+            ));
+        }
+    }
+    // Drop the handler-local sender — the worker (if spawned) cloned
+    // it, so the receiver only completes once the worker exits.
+    drop(tx);
+
+    Sse::new(events_from_receiver(rx))
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+}
+
+/// Per-chunk forwarding loop driving one chat turn. Owns the partner
+/// handle and the message+session id; on completion sends a `Done`
+/// frame (or `Error` on failure) so the client knows the stream is
+/// terminal.
+async fn stream_worker(
+    partner: Arc<ThinkingPartner>,
+    session_id: Option<Uuid>,
+    msg: String,
+    skill_names: Vec<String>,
+    tx: mpsc::Sender<ChatStreamEvent>,
+) {
+    // Backend → handler chunk channel. Drained inline below into
+    // ChatStreamEvent::Token frames; the partner side closes its
+    // sender once the assembled text is committed to the session.
+    let (chunk_tx, chunk_rx) = mpsc::channel::<StreamChunk>(64);
+
+    // Up-front skill_loaded frames give the TUI the catalog the model
+    // could see this turn. Per-skill autoload frames come from the
+    // backend during the stream (Anthropic only at v0.5.0).
+    for name in skill_names {
+        if tx
+            .send(ChatStreamEvent::SkillLoaded { name })
+            .await
+            .is_err()
+        {
+            return; // client gone before we even started
+        }
+    }
+
+    // Spawn the partner drive on a separate task so we can interleave
+    // chunk forwarding with the partner call. The partner takes a
+    // borrow of the sender; we own it in this task.
+    let partner_arc = partner.clone();
+    let chunk_tx_inner = chunk_tx.clone();
+    let session_id_for_worker = session_id;
+    let msg_for_worker = msg.clone();
+    let drive: tokio::task::JoinHandle<Result<Uuid, ChatError>> = tokio::spawn(async move {
+        let result = match session_id_for_worker {
+            None => partner_arc
+                .stream_start_session(msg_for_worker, &chunk_tx_inner)
+                .await
+                .map(|id| id.0)
+                .map_err(|e| map_thinking_error(e, None)),
+            Some(raw) => {
+                let id = SessionId(raw);
+                partner_arc
+                    .stream_send(id, msg_for_worker, &chunk_tx_inner)
+                    .await
+                    .map(|_| raw)
+                    .map_err(|e| map_thinking_error(e, Some(raw)))
+            }
+        };
+        drop(chunk_tx_inner);
+        result
+    });
+    drop(chunk_tx);
+
+    // Forward every chunk the partner emits to the SSE client.
+    let mut chunk_stream = ReceiverStream::new(chunk_rx);
+    while let Some(chunk) = chunk_stream.next().await {
+        let event = match chunk {
+            StreamChunk::Token(content) => ChatStreamEvent::Token { content },
+            StreamChunk::SkillLoaded(name) => ChatStreamEvent::SkillLoaded { name },
+        };
+        if tx.send(event).await.is_err() {
+            // Client disconnected. Keep draining `chunk_stream` so the
+            // partner task isn't stuck on its sender; we just stop
+            // forwarding to a dropped sink.
+            while chunk_stream.next().await.is_some() {}
+            break;
+        }
+    }
+
+    // Partner task is done — collect its outcome.
+    let outcome = match drive.await {
+        Ok(r) => r,
+        Err(join_err) => {
+            // Panic or cancellation in the worker — surface as
+            // Internal so the client knows the stream is terminal.
+            emit_error(
+                &tx,
+                ChatError::Internal {
+                    message: format!("partner task panicked: {join_err}"),
+                },
+            )
+            .await;
+            return;
+        }
+    };
+
+    match outcome {
+        Ok(sid) => {
+            let _ = tx.send(ChatStreamEvent::Done { session_id: sid }).await;
+        }
+        Err(err) => emit_error(&tx, err).await,
+    }
+}
+
+/// Build an SSE event stream from the receiver. Each [`ChatStreamEvent`]
+/// becomes one `data: {...}\n\n` frame. Serialization failures (should
+/// never happen for our static enum) are swallowed with a warn-log to
+/// avoid taking down the whole stream.
+fn events_from_receiver(
+    rx: mpsc::Receiver<ChatStreamEvent>,
+) -> impl futures::Stream<Item = std::result::Result<Event, Infallible>> {
+    ReceiverStream::new(rx).filter_map(|ev| match Event::default().json_data(&ev) {
+        Ok(frame) => Some(Ok(frame)),
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to serialize ChatStreamEvent for SSE");
+            None
+        }
+    })
+}
+
+/// Emit an `Error` frame on the wire stream. `into_kind_str` keeps the
+/// discriminator stable for the TUI to switch on.
+async fn emit_error(tx: &mpsc::Sender<ChatStreamEvent>, err: ChatError) {
+    let kind = match &err {
+        ChatError::BadRequest { .. } => "bad_request",
+        ChatError::UnknownSession { .. } => "unknown_session",
+        ChatError::SessionClosed { .. } => "session_closed",
+        ChatError::Backend { .. } => "backend",
+        ChatError::Unavailable { .. } => "unavailable",
+        ChatError::Internal { .. } => "internal",
+    };
+    // Pull the message field for client-display via serde so we don't
+    // need a giant match arm per variant.
+    let payload = serde_json::to_value(&err).unwrap_or_else(|_| json!({"kind": kind}));
+    let message = payload
+        .get("message")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_default();
+    let _ = tx
+        .send(ChatStreamEvent::Error {
+            error_kind: kind.to_string(),
+            message,
+        })
+        .await;
 }
 
 #[cfg(test)]

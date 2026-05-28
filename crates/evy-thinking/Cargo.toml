@@ -33,12 +33,21 @@ tokio = { workspace = true }
 # Trait objects with `async fn` (LlmBackend::respond).
 async-trait = { workspace = true }
 
-# Anthropic HTTP transport. `rustls-tls` matches evy-research and
-# evy-comms; `json` enables typed (de)serialization.
+# HTTP transport — Anthropic Messages, LM Studio's local OpenAI-compat
+# endpoint, and Codex Responses. `rustls-tls` matches evy-research and
+# evy-comms; `json` enables typed (de)serialization. `stream` exposes
+# `Response::bytes_stream()` so the streaming `stream_respond` paths
+# can incrementally parse `data: {...}` deltas without buffering the
+# whole reply.
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls",
+    "stream",
 ] }
+# `Response::bytes_stream()` consumers need `StreamExt::next()`; pulled
+# in at this crate's top level so the streaming backends don't have to
+# re-derive the dep.
+futures-util = "0.3"
 
 # Serialization + time.
 serde = { workspace = true }

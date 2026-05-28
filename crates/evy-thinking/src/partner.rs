@@ -11,10 +11,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info};
 
-use crate::backend::LlmBackend;
+use crate::backend::{LlmBackend, StreamChunk};
 use crate::error::{Result, ThinkingError};
 use crate::session::{Message, Role, Session, SessionId, SessionStatus};
 use crate::templates::{conclusion_user_turn, kickoff_user_turn, planning_system_prompt};
@@ -184,6 +184,113 @@ impl ThinkingPartner {
         Ok(reply)
     }
 
+    /// Streaming variant of [`start_session`](Self::start_session).
+    ///
+    /// Opens a fresh planning session, drives the backend's streaming
+    /// response into `sink`, and once the full opening turn has been
+    /// emitted appends it to the session log + fires the message hook.
+    /// Returns the freshly-minted [`SessionId`] so the HTTP layer can
+    /// include it in the SSE `done` frame.
+    ///
+    /// # Errors
+    /// Same as [`start_session`](Self::start_session).
+    pub async fn stream_start_session(
+        &self,
+        topic: String,
+        sink: &mpsc::Sender<StreamChunk>,
+    ) -> Result<SessionId> {
+        if topic.trim().is_empty() {
+            return Err(ThinkingError::Input("topic is empty".to_string()));
+        }
+
+        let mut session = Session::new(topic.clone());
+        let id = session.id;
+
+        let opened = Message::new(id, Role::System, format!("Session opened: {topic}"));
+        self.emit(&opened);
+        session.push(opened);
+
+        let kickoff = Message::new(id, Role::Operator, kickoff_user_turn());
+        self.emit(&kickoff);
+        session.push(kickoff);
+
+        let system_prompt = planning_system_prompt(&topic);
+        let opening = self
+            .backend
+            .stream_respond(&system_prompt, &session.messages, sink)
+            .await?;
+
+        let partner_msg = Message::new(id, Role::Partner, opening);
+        self.emit(&partner_msg);
+        session.push(partner_msg);
+
+        info!(
+            session = %id.0,
+            turns = session.messages.len(),
+            "evy-thinking: streaming session opened",
+        );
+
+        self.sessions.lock().await.insert(id, session);
+        Ok(id)
+    }
+
+    /// Streaming variant of [`send`](Self::send).
+    ///
+    /// Same lock-discipline as the blocking path:
+    /// 1. acquire lock → push operator turn → snapshot history → drop
+    /// 2. backend streams chunks into `sink`, returning assembled text
+    /// 3. re-acquire lock → push partner turn → drop
+    ///
+    /// # Errors
+    /// Same as [`send`](Self::send).
+    pub async fn stream_send(
+        &self,
+        id: SessionId,
+        operator_input: String,
+        sink: &mpsc::Sender<StreamChunk>,
+    ) -> Result<String> {
+        if operator_input.trim().is_empty() {
+            return Err(ThinkingError::Input("operator_input is empty".to_string()));
+        }
+
+        let (system_prompt, history) = {
+            let mut guard = self.sessions.lock().await;
+            let session = guard
+                .get_mut(&id)
+                .ok_or(ThinkingError::UnknownSession(id))?;
+            if session.status != SessionStatus::Active {
+                return Err(ThinkingError::BackendRefused(format!(
+                    "session is {:?}, not Active",
+                    session.status
+                )));
+            }
+            let op_msg = Message::new(id, Role::Operator, operator_input);
+            self.emit(&op_msg);
+            session.push(op_msg);
+            let prompt = planning_system_prompt(&session.topic);
+            (prompt, session.messages.clone())
+        };
+
+        debug!(session = %id.0, turns = history.len(), "evy-thinking: stream_send");
+
+        let reply = self
+            .backend
+            .stream_respond(&system_prompt, &history, sink)
+            .await?;
+
+        {
+            let mut guard = self.sessions.lock().await;
+            let session = guard
+                .get_mut(&id)
+                .ok_or(ThinkingError::UnknownSession(id))?;
+            let partner_msg = Message::new(id, Role::Partner, reply.clone());
+            self.emit(&partner_msg);
+            session.push(partner_msg);
+        }
+
+        Ok(reply)
+    }
+
     /// Conclude a session — appends the conclusion user turn, asks the
     /// backend for PHASE 3 final summary, marks the session
     /// [`SessionStatus::Concluded`].
@@ -258,6 +365,22 @@ impl ThinkingPartner {
         let mut out: Vec<Session> = guard.values().cloned().collect();
         out.sort_by_key(|s| std::cmp::Reverse(s.last_activity));
         Ok(out)
+    }
+
+    /// Drop a session from the in-memory store.
+    ///
+    /// Returns `true` when the id matched an entry that was removed;
+    /// `false` when the id was unknown (no-op). Phase 6 — the HTTP
+    /// `DELETE /api/evy/sessions/:id` handler uses this signal to
+    /// return 204 vs. 404. The on-disk learning-loop record (if a
+    /// message hook is wired) is **not** touched — drop only evicts
+    /// the in-memory replay buffer.
+    ///
+    /// # Errors
+    /// Currently infallible; kept as `Result` so a persistence-backed
+    /// future implementation can surface I/O failures.
+    pub async fn drop_session(&self, id: SessionId) -> Result<bool> {
+        Ok(self.sessions.lock().await.remove(&id).is_some())
     }
 
     fn emit(&self, msg: &Message) {
@@ -463,6 +586,27 @@ mod tests {
         assert_eq!(log[4].0, Role::Partner);
         assert_eq!(log[5].0, Role::Operator); // conclusion turn
         assert_eq!(log[6].0, Role::Partner);
+    }
+
+    #[tokio::test]
+    async fn drop_session_removes_known_id_and_reports_true() {
+        let (backend, _) = ScriptedBackend::new(vec!["q?"]);
+        let partner = ThinkingPartner::new(backend);
+        let id = partner.start_session("t".into()).await.unwrap();
+        let ok = partner.drop_session(id).await.unwrap();
+        assert!(ok, "first drop must report true");
+        // Session no longer reachable.
+        let s = partner.session(id).await.unwrap();
+        assert!(s.is_none());
+    }
+
+    #[tokio::test]
+    async fn drop_session_unknown_id_returns_false() {
+        let (backend, _) = ScriptedBackend::new(vec![]);
+        let partner = ThinkingPartner::new(backend);
+        let bogus = SessionId::new();
+        let ok = partner.drop_session(bogus).await.unwrap();
+        assert!(!ok);
     }
 
     #[tokio::test]
