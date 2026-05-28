@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use evy::config::{
     ClaudeCodeConfigToml, CodexConfigToml, CommsConfig, MemoryConfig, PolicyConfig,
-    ProvidersConfig, SchedulerConfig,
+    ProvidersConfig, SchedulerConfig, SkillsConfig,
 };
 use evy::{run_smoke_test, Config};
 use evy_core::PolicyMode;
@@ -75,6 +75,7 @@ async fn phase1_smoke_test_runs_cron_job_and_exits_clean() -> anyhow::Result<()>
         // wiring.
         comms: CommsConfig::default(),
         memory: MemoryConfig::default(),
+        skills: SkillsConfig::default(),
     };
 
     let report = run_smoke_test(config).await?;

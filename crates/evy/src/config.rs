@@ -64,6 +64,11 @@ pub struct Config {
     /// Defaulted so a fresh install boots without a TOML.
     #[serde(default)]
     pub memory: MemoryConfig,
+    /// Skill catalog configuration: directory the daemon hands to
+    /// `evy_skills::SkillRegistry::load` at boot. Defaulted so a fresh
+    /// install boots with `skills/` resolved relative to the working dir.
+    #[serde(default)]
+    pub skills: SkillsConfig,
 }
 
 /// `[scheduler]` table.
@@ -320,6 +325,32 @@ impl Default for MemoryConfig {
     }
 }
 
+// ─── Phase 5 Slice — skills ───────────────────────────────────────────
+
+/// `[skills]` table — points the daemon at the skill catalog directory
+/// `evy_skills::SkillRegistry::load` walks at boot.
+///
+/// Default resolves to `skills/` relative to the daemon's working
+/// directory so a fresh install with the in-tree catalog boots without
+/// operator config. Set `enabled = false` to skip catalog load entirely
+/// (useful for boot smoke tests and minimal-deploy debugging).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SkillsConfig {
+    /// Directory the registry walks (`<directory>/*/SKILL.md`).
+    pub directory: PathBuf,
+    /// When `false`, the daemon skips loading the catalog. Default `true`.
+    pub enabled: bool,
+}
+
+impl Default for SkillsConfig {
+    fn default() -> Self {
+        Self {
+            directory: PathBuf::from("skills"),
+            enabled: true,
+        }
+    }
+}
+
 impl Config {
     /// Resolve from the binary's default sources: `$SUBCTL_EVY_CONFIG`
     /// falling back to `./config/evy.toml`, plus env override.
@@ -390,6 +421,9 @@ policy_mode = "Trusted"
             cfg.memory.observation_db,
             PathBuf::from("/tmp/evy-observations.db")
         );
+        // Skills section omitted on disk — defaults must fill in.
+        assert_eq!(cfg.skills.directory, PathBuf::from("skills"));
+        assert!(cfg.skills.enabled);
     }
 
     #[test]
@@ -549,6 +583,35 @@ claude_mem_db = "/Users/sem/.claude-mem/db.sqlite"
         assert_eq!(c.bot_token, "tok");
         assert_eq!(c.channel_id, 100);
         assert_eq!(c.application_id, 200);
+    }
+
+    #[test]
+    fn skills_section_parses_and_overrides_defaults() {
+        let f = write_toml(
+            r#"
+[scheduler]
+db_path = "/tmp/evy.db"
+
+[policy]
+path = "/tmp/policy.toml"
+
+[providers]
+
+[skills]
+directory = "/opt/evy/skills"
+enabled = false
+"#,
+        );
+        let cfg = Config::load_from(f.path()).expect("parse");
+        assert_eq!(cfg.skills.directory, PathBuf::from("/opt/evy/skills"));
+        assert!(!cfg.skills.enabled);
+    }
+
+    #[test]
+    fn skills_defaults_are_relative_skills_dir() {
+        let s = SkillsConfig::default();
+        assert_eq!(s.directory, PathBuf::from("skills"));
+        assert!(s.enabled);
     }
 
     #[test]
