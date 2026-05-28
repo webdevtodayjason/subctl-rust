@@ -27,7 +27,7 @@ use std::time::Duration;
 use anyhow::Result;
 use evy::config::{
     ClaudeCodeConfigToml, CodexConfigToml, CommsConfig, HttpSectionConfig, MemoryConfig,
-    PolicyConfig, ProvidersConfig, SchedulerConfig,
+    PolicyConfig, ProvidersConfig, SchedulerConfig, SkillsConfig,
 };
 use evy::{run_daemon_with_shutdown, Config, DaemonHooks};
 use evy_core::PolicyMode;
@@ -129,6 +129,7 @@ async fn daemon_full_smoke_serves_health_jobs_and_shuts_down() -> Result<()> {
             preferences_db: dir.path().join("preferences.db"),
             claude_mem_db: None,
         },
+        skills: SkillsConfig::default(),
     };
 
     let shutdown = CancellationToken::new();
@@ -274,6 +275,7 @@ async fn daemon_creates_missing_playbook_dir() -> Result<()> {
             preferences_db: dir.path().join("preferences.db"),
             claude_mem_db: None,
         },
+        skills: SkillsConfig::default(),
     };
 
     let shutdown = CancellationToken::new();
