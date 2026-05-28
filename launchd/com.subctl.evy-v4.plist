@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.subctl.evy-v4.plist — TEMPLATE
+  ──────────────────────────────────────────────────────────────────────
+  This file is the unprocessed template. The installer
+  (`scripts/install_plist.sh`) substitutes the `{{...}}` placeholders
+  for absolute paths derived from $HOME at install time, then writes
+  the rendered plist to ~/Library/LaunchAgents/com.subctl.evy-v4.plist.
+
+  launchd does NOT expand `~` or env vars in plist string values, so
+  every path must be absolute on disk.
+
+  Label is deliberately `com.subctl.evy-v4` — distinct from v3's
+  `com.subctl.evy`, so v3 and v4 can coexist side-by-side and the
+  operator can cut over manually with `--replace-v3` once smoke tests
+  pass.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.subctl.evy-v4</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{INSTALL_DIR}}/evy</string>
+        <string>--config</string>
+        <string>{{CONFIG_PATH}}</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>WorkingDirectory</key>
+    <string>{{WORKING_DIR}}</string>
+
+    <key>StandardOutPath</key>
+    <string>{{LOG_DIR}}/evy-v4.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>{{LOG_DIR}}/evy-v4.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUST_LOG</key>
+        <string>evy=info</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>
