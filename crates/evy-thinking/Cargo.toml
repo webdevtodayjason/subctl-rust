@@ -14,6 +14,12 @@ repository.workspace = true
 # reachable for "convert a planning session into a dispatch handoff").
 evy-core = { workspace = true }
 
+# Skills registry — the AnthropicBackend optionally holds an
+# `Arc<SkillRegistry>` and uses [`SkillRegistry::index_for_prompt`] +
+# `SkillRegistry::find` to drive Hermes-style LLM autoload via a
+# `skill_view` tool call. See [`crate::anthropic`] for the wiring.
+evy-skills = { workspace = true }
+
 # Async runtime — `Mutex` lives in `tokio::sync` because the sessions
 # guard is held across `.await` on the LLM HTTP call.
 tokio = { workspace = true }
@@ -50,3 +56,12 @@ tokio = { workspace = true, features = ["full", "test-util"] }
 # Mock the Anthropic Messages API at the `reqwest` boundary so unit
 # tests never touch `api.anthropic.com`.
 wiremock = "0.6"
+# Capture `tracing::info!` events into a buffer so the skill-autoload
+# integration test can assert the autoload trace fires when the model
+# requests a `skill_view`. Uses the existing workspace dep — no new
+# version pinning.
+tracing-subscriber = { workspace = true }
+# Temp directories — used in unit tests to construct an empty
+# `SkillRegistry` for the "empty registry must not advertise the tool"
+# guard. Matches the version evy-skills already uses.
+tempfile = "3"

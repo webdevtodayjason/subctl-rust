@@ -16,12 +16,24 @@
 //! Results are sorted descending by score with the skill name as a
 //! deterministic tie-breaker (alphabetical).
 //!
-//! // TODO: Phase 5 — swap the substring matcher for a semantic
-//! // retriever. The intended path is to keep this trait-flat (`route`
-//! // stays sync, takes `&str`, returns `Vec<RoutedSkill>`) but to gain
-//! // a `route_async` companion that hits an embeddings service. The
-//! // `tokio` and `async-trait` dependencies are already declared in
-//! // `Cargo.toml` for that work.
+//! ## Autonomous (LLM-driven) skill loading lives elsewhere
+//!
+//! Phase 5 originally planned to swap this matcher for an embeddings-
+//! backed semantic retriever. We did NOT do that: the hermes-researcher
+//! findings under `.subctl/docs/hermes-compact-and-skills-findings.md`
+//! §2.5 demonstrate that an LLM-as-router (via a `## Skills (mandatory)`
+//! system-prompt index + a `skill_view(name)` tool call) is both cheaper
+//! and more accurate than embeddings for this use case as long as the
+//! index fits in the system prompt cache.
+//!
+//! That autonomous path lives in `evy-thinking::AnthropicBackend`,
+//! which calls [`SkillRegistry::index_for_prompt`] at request time and
+//! handles the `skill_view` tool round-trip. This [`SkillRouter`] is
+//! retained for the **deterministic** surface — slash commands and any
+//! other call site that needs "give me the top-K skills for this exact
+//! situation string" without consulting an LLM.
+//!
+//! [`SkillRegistry::index_for_prompt`]: crate::SkillRegistry::index_for_prompt
 
 use std::sync::Arc;
 
