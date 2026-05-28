@@ -130,6 +130,7 @@ async fn daemon_full_smoke_serves_health_jobs_and_shuts_down() -> Result<()> {
             claude_mem_db: None,
         },
         skills: SkillsConfig::default(),
+        thinking_partner: None,
     };
 
     let shutdown = CancellationToken::new();
@@ -276,6 +277,7 @@ async fn daemon_creates_missing_playbook_dir() -> Result<()> {
             claude_mem_db: None,
         },
         skills: SkillsConfig::default(),
+        thinking_partner: None,
     };
 
     let shutdown = CancellationToken::new();

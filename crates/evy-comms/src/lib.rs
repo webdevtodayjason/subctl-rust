@@ -21,6 +21,7 @@
 //! | GET | `/api/evy/workers` | JSON list of [`WorkerSummary`] |
 //! | GET | `/api/evy/scheduler/jobs` | JSON list of [`JobSummary`] |
 //! | GET | `/api/evy/policy` | the loaded [`evy_policy::Policy`] as JSON |
+//! | POST | `/api/evy/chat` | operator chat turn → Evy's reply ([`ChatRequest`] → [`ChatResponse`]) |
 //! | GET | `/api/master/*` | URI-rewrite alias for `/api/evy/*` (legacy curl recipes) |
 //!
 //! # Telegram (2B2)
@@ -69,6 +70,9 @@ pub mod telegram;
 pub mod discord;
 pub mod discord_config;
 
+// ── Phase 6 Slice: chat surface ──────────────────────────────────────
+pub mod chat;
+
 // ── Public re-exports — the surface the daemon binary consumes ───────
 
 pub use config::{HttpConfig, DEFAULT_HOST, DEFAULT_PORT};
@@ -83,3 +87,5 @@ pub use telegram::{InboundMessage, TelegramBridge, TelegramConfig};
 
 pub use discord::{render_embed, DiscordBridge, Embed, EmbedField};
 pub use discord_config::DiscordConfig;
+
+pub use chat::{ChatError, ChatRequest, ChatResponse};

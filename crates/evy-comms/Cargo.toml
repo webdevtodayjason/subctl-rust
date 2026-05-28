@@ -16,6 +16,11 @@ evy-core = { workspace = true }
 evy-policy = { workspace = true }
 evy-providers = { workspace = true }
 evy-scheduler = { workspace = true }
+# Phase 6: chat surface delegates to ThinkingPartner. Optional via the
+# AppState::thinking_partner() trait method — implementers that don't
+# need chat return `None` and the route returns 503.
+evy-thinking = { workspace = true }
+evy-skills = { workspace = true }
 
 # Async runtime + cancellation token for graceful shutdown.
 tokio = { workspace = true }

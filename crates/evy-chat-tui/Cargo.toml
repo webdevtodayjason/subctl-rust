@@ -1,0 +1,52 @@
+[package]
+name = "evy-chat-tui"
+description = "Evy v4 terminal chat client. ratatui-based REPL against the daemon's POST /api/evy/chat endpoint."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "evy_chat_tui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "evy-chat"
+path = "src/main.rs"
+
+[dependencies]
+# Terminal UI — vanilla ratatui + crossterm. Same versions as
+# evy-tui so we don't fork the rendering stack.
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+
+# Async runtime — multiplex key events and pending HTTP futures.
+tokio = { workspace = true }
+tokio-util = "0.7"
+
+# HTTP client only — no SSE this slice (non-streaming endpoint).
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+futures = "0.3"
+
+# JSON wire shapes. `Uuid` matches the session id type the daemon emits.
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+
+# Errors + CLI + logging.
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+# Mock the daemon's HTTP surface at the reqwest boundary so the api
+# module is covered without booting a real daemon.
+wiremock = "0.6"

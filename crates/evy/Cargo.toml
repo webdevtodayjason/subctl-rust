@@ -25,6 +25,10 @@ evy-providers = { workspace = true }
 evy-scheduler = { workspace = true }
 evy-comms = { workspace = true }
 evy-memory = { workspace = true }
+# Phase 6 — chat surface. The daemon optionally constructs a
+# ThinkingPartner and hands it to evy-comms via DaemonAppState.
+evy-thinking = { workspace = true }
+evy-skills = { workspace = true }
 
 # Runtime + observability
 tokio = { workspace = true }

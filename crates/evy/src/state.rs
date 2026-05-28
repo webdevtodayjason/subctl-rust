@@ -36,6 +36,8 @@ use evy_comms::{AppState, JobSummary, WorkerSummary};
 use evy_memory::ObservationLog;
 use evy_policy::Policy;
 use evy_scheduler::Scheduler;
+use evy_skills::SkillRegistry;
+use evy_thinking::ThinkingPartner;
 
 /// Daemon-side `AppState` impl. Reads through to the live scheduler +
 /// policy + observation log; mutations are explicitly NOT supported on
@@ -54,6 +56,15 @@ pub struct DaemonAppState {
     /// `AppState::recent_events()` extension; not read by any current
     /// handler. Held so callers don't need to thread it separately.
     pub obs_log: Arc<ObservationLog>,
+    /// Optional thinking-partner. Phase 6 — when present, the
+    /// `POST /api/evy/chat` route delegates here. When absent, the
+    /// route returns 503 (`unavailable`).
+    pub thinking_partner: Option<Arc<ThinkingPartner>>,
+    /// Optional skill registry the partner was built with. Surfaced
+    /// to the chat client via the `skills_loaded` field in
+    /// `ChatResponse` so the operator can see which skills the model
+    /// could see this turn.
+    pub skills: Option<Arc<SkillRegistry>>,
 }
 
 impl DaemonAppState {
@@ -70,7 +81,25 @@ impl DaemonAppState {
             scheduler,
             policy,
             obs_log,
+            thinking_partner: None,
+            skills: None,
         }
+    }
+
+    /// Attach a thinking-partner. Builder-style so the daemon
+    /// construction in `run_daemon_with_shutdown` reads top-down.
+    #[must_use]
+    pub fn with_thinking_partner(mut self, partner: Arc<ThinkingPartner>) -> Self {
+        self.thinking_partner = Some(partner);
+        self
+    }
+
+    /// Attach the skill registry the partner was built with. The
+    /// chat handler returns the registry's names in `skills_loaded`.
+    #[must_use]
+    pub fn with_skills(mut self, skills: Arc<SkillRegistry>) -> Self {
+        self.skills = Some(skills);
+        self
     }
 }
 
@@ -109,6 +138,14 @@ impl AppState for DaemonAppState {
 
     async fn policy(&self) -> Policy {
         (*self.policy).clone()
+    }
+
+    fn thinking_partner(&self) -> Option<Arc<ThinkingPartner>> {
+        self.thinking_partner.clone()
+    }
+
+    fn skills(&self) -> Option<Arc<SkillRegistry>> {
+        self.skills.clone()
     }
 }
 

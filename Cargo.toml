@@ -12,6 +12,7 @@ members = [
     "crates/evy-skills",
     "crates/evy-thinking",
     "crates/evy-tui",
+    "crates/evy-chat-tui",
     "crates/evy-voice",
     "crates/evy-watchdog",
     "crates/evy",
@@ -83,6 +84,7 @@ evy-scheduler = { path = "crates/evy-scheduler", version = "0.1.0" }
 evy-comms = { path = "crates/evy-comms", version = "0.1.0" }
 evy-memory = { path = "crates/evy-memory", version = "0.1.0" }
 evy-skills = { path = "crates/evy-skills", version = "0.1.0" }
+evy-thinking = { path = "crates/evy-thinking", version = "0.1.0" }
 
 [profile.release]
 lto = "thin"
