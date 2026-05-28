@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# scripts/_common.sh — shared helpers + canonical paths.
+#
+# Sourced by install.sh AND every script in scripts/. Has no side
+# effects when sourced (no `main`, no top-level work).
+#
+# Bash 3.2 compatible. Sourcing twice is safe (guarded by SUBCTL_LOG_LOADED).
+
+if [ -z "${SUBCTL_LOG_LOADED:-}" ]; then
+  SUBCTL_LOG_LOADED=1
+
+  if [ -t 2 ]; then
+    SUBCTL_C_RED=$'\033[0;31m'
+    SUBCTL_C_GRN=$'\033[0;32m'
+    SUBCTL_C_YEL=$'\033[0;33m'
+    SUBCTL_C_BLU=$'\033[0;34m'
+    SUBCTL_C_DIM=$'\033[2m'
+    SUBCTL_C_RST=$'\033[0m'
+  else
+    SUBCTL_C_RED=""; SUBCTL_C_GRN=""; SUBCTL_C_YEL=""
+    SUBCTL_C_BLU=""; SUBCTL_C_DIM=""; SUBCTL_C_RST=""
+  fi
+  export SUBCTL_C_RED SUBCTL_C_GRN SUBCTL_C_YEL SUBCTL_C_BLU SUBCTL_C_DIM SUBCTL_C_RST
+
+  subctl_info() { printf '%s[info]%s %s\n' "$SUBCTL_C_BLU" "$SUBCTL_C_RST" "$*" >&2; }
+  subctl_ok()   { printf '%s[ ok ]%s %s\n' "$SUBCTL_C_GRN" "$SUBCTL_C_RST" "$*" >&2; }
+  subctl_warn() { printf '%s[warn]%s %s\n' "$SUBCTL_C_YEL" "$SUBCTL_C_RST" "$*" >&2; }
+  subctl_err()  { printf '%s[err ]%s %s\n' "$SUBCTL_C_RED" "$SUBCTL_C_RST" "$*" >&2; }
+  subctl_step() { printf '\n%s── %s ──%s\n' "$SUBCTL_C_DIM" "$*" "$SUBCTL_C_RST" >&2; }
+
+  # `run` honors DRY_RUN — prints what it would do without executing.
+  # Use this for every state-mutating command in sub-scripts.
+  run() {
+    if [ "${DRY_RUN:-false}" = "true" ]; then
+      printf '%s[dry-run]%s %s\n' "$SUBCTL_C_DIM" "$SUBCTL_C_RST" "$*" >&2
+    else
+      eval "$@"
+    fi
+  }
+fi
+
+# ── canonical install paths (single source of truth) ───────────────────────
+# Sub-scripts read these directly. Operators can override SUBCTL_PREFIX
+# etc. before invoking install.sh; we won't clobber.
+: "${SUBCTL_PREFIX:=$HOME/.local/lib/subctl-rust}"
+: "${SUBCTL_BIN:=$SUBCTL_PREFIX/evy}"
+: "${SUBCTL_CONFIG_DIR:=$HOME/.config/subctl}"
+: "${SUBCTL_CONFIG_PATH:=$SUBCTL_CONFIG_DIR/config.toml}"
+: "${SUBCTL_SKILLS_DIR:=$SUBCTL_CONFIG_DIR/skills}"
+: "${SUBCTL_LOG_DIR:=$HOME/Library/Logs/subctl}"
+: "${SUBCTL_PLIST_LABEL:=com.subctl.evy-v4}"
+: "${SUBCTL_PLIST_PATH:=$HOME/Library/LaunchAgents/${SUBCTL_PLIST_LABEL}.plist}"
+: "${SUBCTL_V3_LABEL:=com.subctl.evy}"
+: "${SUBCTL_V3_PLIST:=$HOME/Library/LaunchAgents/${SUBCTL_V3_LABEL}.plist}"
+: "${SUBCTL_HEALTH_URL:=http://127.0.0.1:8787/health}"
+
+# Set by the parent install.sh; default to repo root relative to this file.
+: "${SUBCTL_RUST_ROOT:=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+
+export SUBCTL_PREFIX SUBCTL_BIN SUBCTL_CONFIG_DIR SUBCTL_CONFIG_PATH \
+       SUBCTL_SKILLS_DIR SUBCTL_LOG_DIR SUBCTL_PLIST_LABEL \
+       SUBCTL_PLIST_PATH SUBCTL_V3_LABEL SUBCTL_V3_PLIST \
+       SUBCTL_HEALTH_URL SUBCTL_RUST_ROOT
