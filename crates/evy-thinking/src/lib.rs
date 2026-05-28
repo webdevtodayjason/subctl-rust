@@ -65,6 +65,7 @@
 pub mod anthropic;
 pub mod backend;
 pub mod error;
+pub mod lm_studio;
 pub mod partner;
 pub mod session;
 pub mod templates;
@@ -77,6 +78,12 @@ pub use anthropic::{
 };
 pub use backend::LlmBackend;
 pub use error::{Result, ThinkingError};
+pub use lm_studio::{
+    LmStudioBackend, LmStudioConfig, DEFAULT_LM_STUDIO_ENDPOINT,
+    DEFAULT_MAX_TOKENS as DEFAULT_LM_STUDIO_MAX_TOKENS,
+    DEFAULT_TEMPERATURE as DEFAULT_LM_STUDIO_TEMPERATURE,
+    DEFAULT_TIMEOUT as DEFAULT_LM_STUDIO_TIMEOUT,
+};
 pub use partner::{MessageHook, ThinkingPartner};
 pub use session::{Message, Role, Session, SessionId, SessionStatus};
 pub use templates::{conclusion_user_turn, kickoff_user_turn, planning_system_prompt};

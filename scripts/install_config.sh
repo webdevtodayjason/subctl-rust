@@ -77,6 +77,32 @@ playbook_dir   = "__SUBCTL_CONFIG_DIR__/playbooks"
 
 # Optional: surface claude-mem priors via FTS5 retrieval.
 # claude_mem_db = "__HOME__/.claude-mem/db.sqlite"
+
+# ── Phase 6 — thinking-partner (operator chat surface) ───────────────
+#
+# Backend tradeoffs (recommended default: lm-studio):
+#   lm-studio  — local OpenAI-compat model running in LM Studio on
+#                127.0.0.1:1234. Free, fast, private, no API key. Best
+#                for lightweight "what's running / what's broken" chat.
+#   anthropic  — direct Anthropic Messages API. Highest quality;
+#                requires a paid key in ANTHROPIC_API_KEY (or
+#                whichever env var `api_key_env` names).
+#   stub       — fixed-reply stub for smoke tests; never touches a
+#                network.
+#
+# Without this block the daemon boots without a chat surface and
+# POST /api/evy/chat returns 503.
+#
+# [thinking_partner]
+# backend = "lm-studio"
+# # Optional model override — required only when LM Studio has more
+# # than one model loaded and you want to pin one.
+# # model = "gemma-4-26b-a4b-it-mlx"
+# # max_tokens = 2048
+#
+# [thinking_partner.lm_studio]
+# endpoint = "http://127.0.0.1:1234"
+# temperature = 0.7
 TOML_EOF
 
 # Substitute placeholders. Using sed with `|` delimiter to avoid escaping `/`.
