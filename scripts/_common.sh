@@ -44,7 +44,11 @@ fi
 # etc. before invoking install.sh; we won't clobber.
 : "${SUBCTL_PREFIX:=$HOME/.local/lib/subctl-rust}"
 : "${SUBCTL_BIN:=$SUBCTL_PREFIX/evy}"
-: "${SUBCTL_CONFIG_DIR:=$HOME/.config/subctl}"
+# v4 lives in its OWN config subdir to avoid collisions with v3's state
+# at $HOME/.config/subctl/ (config.toml, accounts.conf, cognee.json, evy/, …).
+# Parallel-test mode: both v3 and v4 daemons can run simultaneously
+# because their state is fully isolated.
+: "${SUBCTL_CONFIG_DIR:=$HOME/.config/subctl/v4}"
 : "${SUBCTL_CONFIG_PATH:=$SUBCTL_CONFIG_DIR/config.toml}"
 : "${SUBCTL_SKILLS_DIR:=$SUBCTL_CONFIG_DIR/skills}"
 : "${SUBCTL_LOG_DIR:=$HOME/Library/Logs/subctl}"
@@ -52,7 +56,10 @@ fi
 : "${SUBCTL_PLIST_PATH:=$HOME/Library/LaunchAgents/${SUBCTL_PLIST_LABEL}.plist}"
 : "${SUBCTL_V3_LABEL:=com.subctl.evy}"
 : "${SUBCTL_V3_PLIST:=$HOME/Library/LaunchAgents/${SUBCTL_V3_LABEL}.plist}"
-: "${SUBCTL_HEALTH_URL:=http://127.0.0.1:8787/health}"
+# v4 binds to 8797 by default so it can run side-by-side with v3 on 8787.
+# Cutover step (later): edit the rendered config.toml to set port = 8787
+# AND stop v3 first.
+: "${SUBCTL_HEALTH_URL:=http://127.0.0.1:8797/health}"
 
 # Set by the parent install.sh; default to repo root relative to this file.
 : "${SUBCTL_RUST_ROOT:=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"

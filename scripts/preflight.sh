@@ -81,28 +81,33 @@ if [ -d "$HOME" ]; then
   fi
 fi
 
-# --- port 8787 (Evy HTTP) ---
+# --- port 8787 (v3 Evy HTTP — informational) ---
 PORT_HOLDER=""
 if command -v lsof >/dev/null 2>&1; then
-  # -n no DNS, -P no service name; head -1 in case of multiple lines.
   PORT_HOLDER="$(lsof -nP -iTCP:8787 -sTCP:LISTEN 2>/dev/null | awk 'NR==2 {print $1, $2}' || true)"
 fi
 if [ -z "$PORT_HOLDER" ]; then
-  subctl_ok "port 8787: free"
+  subctl_info "port 8787: free (v3 not running)"
 else
-  # Check whether the holder is v3 evy — that's expected and OK.
   V3_RUNNING="$(launchctl list 2>/dev/null | awk -v lbl="$SUBCTL_V3_LABEL" '$3 == lbl {print $1}' || true)"
   if [ -n "$V3_RUNNING" ]; then
-    subctl_info "port 8787 held by v3 evy (PID $V3_RUNNING) — expected; v4 will not bind until cutover"
-    if [ "${REPLACE_V3:-false}" != "true" ] && [ "${DRY_RUN:-false}" != "true" ]; then
-      subctl_warn "v3 is running on :8787. Default install is side-by-side; v4 won't be loaded."
-      subctl_warn "Use --replace-v3 to unload v3 and start v4 immediately."
-    fi
+    subctl_info "port 8787 held by v3 evy (PID $V3_RUNNING) — expected for side-by-side"
   else
-    subctl_warn "port 8787 held by an unrelated process: $PORT_HOLDER"
-    subctl_warn "v4 will fail to bind. Stop that process or change config."
-    WARN_COUNT=$((WARN_COUNT + 1))
+    subctl_info "port 8787 held by an unrelated process: $PORT_HOLDER (informational; v4 binds 8797)"
   fi
+fi
+
+# --- port 8797 (v4 Evy HTTP — the port v4 WILL bind) ---
+V4_PORT_HOLDER=""
+if command -v lsof >/dev/null 2>&1; then
+  V4_PORT_HOLDER="$(lsof -nP -iTCP:8797 -sTCP:LISTEN 2>/dev/null | awk 'NR==2 {print $1, $2}' || true)"
+fi
+if [ -z "$V4_PORT_HOLDER" ]; then
+  subctl_ok "port 8797: free (v4 will bind here)"
+else
+  subctl_warn "port 8797 held by: $V4_PORT_HOLDER"
+  subctl_warn "v4 will fail to bind. Free the port or edit config.toml after install."
+  WARN_COUNT=$((WARN_COUNT + 1))
 fi
 
 # --- ports 8788 (reserved) and 8789 (TTS) — informational ---

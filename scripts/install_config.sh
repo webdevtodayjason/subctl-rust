@@ -64,7 +64,9 @@ db_path = "__SUBCTL_CONFIG_DIR__/evy-scheduler.db"
 
 [comms.http]
 host = "127.0.0.1"
-port = 8787
+# Parallel-test default: 8797 lets v4 run alongside v3 (still on 8787).
+# When you're ready to fully cut over, change this to 8787 AND stop v3 first.
+port = 8797
 allow_origins = []
 
 [memory]
