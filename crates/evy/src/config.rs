@@ -69,6 +69,11 @@ pub struct Config {
     /// install boots with `skills/` resolved relative to the working dir.
     #[serde(default)]
     pub skills: SkillsConfig,
+    /// Optional thinking-partner configuration. When absent (the
+    /// default), the daemon boots without a chat surface; the
+    /// `POST /api/evy/chat` endpoint then returns 503. Phase 6.
+    #[serde(default)]
+    pub thinking_partner: Option<ThinkingPartnerSectionConfig>,
 }
 
 /// `[scheduler]` table.
@@ -349,6 +354,42 @@ impl Default for SkillsConfig {
             enabled: true,
         }
     }
+}
+
+// ─── Phase 6 — thinking-partner ───────────────────────────────────────
+
+/// `[thinking_partner]` table — wires the chat surface to an LLM
+/// backend. Absent → no chat endpoint is served (503).
+///
+/// The backend selector is stringly-typed today (`"anthropic"` /
+/// `"stub"`) so the operator's TOML stays readable without a custom
+/// serde adapter. The daemon validates the value at boot.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ThinkingPartnerSectionConfig {
+    /// Backend selector. Currently `"anthropic"` (production) or
+    /// `"stub"` (smoke tests; returns a fixed reply without calling
+    /// any API).
+    #[serde(default = "default_backend")]
+    pub backend: String,
+    /// Environment variable holding the Anthropic API key. Default
+    /// `ANTHROPIC_API_KEY`. Only consulted when `backend = "anthropic"`.
+    #[serde(default = "default_api_key_env")]
+    pub api_key_env: String,
+    /// Optional model override (e.g. `"claude-sonnet-4-5"`). When
+    /// absent, the Anthropic backend's pinned default applies.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Optional `max_tokens` override sent on every request.
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+}
+
+fn default_backend() -> String {
+    "anthropic".to_string()
+}
+
+fn default_api_key_env() -> String {
+    "ANTHROPIC_API_KEY".to_string()
 }
 
 impl Config {

@@ -22,12 +22,14 @@ use axum::{
     extract::State,
     http::{HeaderValue, StatusCode},
     response::{IntoResponse, Json, Response},
-    routing::get,
+    routing::{get, post},
     Router,
 };
 use evy_core::{MandateId, ProviderKind, WorkerId, WorkerStatus};
 use evy_policy::Policy;
 use evy_scheduler::{JobAction, JobId};
+use evy_skills::SkillRegistry;
+use evy_thinking::ThinkingPartner;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -61,6 +63,25 @@ pub trait AppState: Send + Sync + 'static {
 
     /// The currently-loaded policy. Cheap to clone for serialization.
     async fn policy(&self) -> Policy;
+
+    /// Phase 6 — return the daemon's thinking-partner if one is
+    /// configured. The chat handler at `POST /api/evy/chat` returns 503
+    /// when this is `None`.
+    ///
+    /// Default impl returns `None` so existing implementations
+    /// (notably [`StubAppState`]) keep compiling without change.
+    fn thinking_partner(&self) -> Option<Arc<ThinkingPartner>> {
+        None
+    }
+
+    /// Phase 6 — the skill registry attached to the partner. Returned
+    /// by the chat handler in the `skills_loaded` field so the operator
+    /// can see which skills the model could see this turn.
+    ///
+    /// Default impl returns `None`.
+    fn skills(&self) -> Option<Arc<SkillRegistry>> {
+        None
+    }
 }
 
 /// Operator-console-shaped projection of an evy-core `WorkerHandle`.
@@ -267,11 +288,14 @@ impl BoundHttpServer {
 
 /// Per-request state passed to every handler via axum's [`State`]
 /// extractor.
+///
+/// `pub(crate)` so sibling modules (`chat`) can extract it without
+/// re-declaring; the type is still not exposed to downstream crates.
 #[derive(Clone)]
-struct HttpState {
-    broadcaster: EventBroadcaster,
-    app: Arc<dyn AppState>,
-    version: &'static str,
+pub(crate) struct HttpState {
+    pub(crate) broadcaster: EventBroadcaster,
+    pub(crate) app: Arc<dyn AppState>,
+    pub(crate) version: &'static str,
 }
 
 /// Workspace version of `evy-comms`. The dashboard exposes this on
@@ -310,7 +334,12 @@ fn build_router(
         .route("/api/evy/scheduler/jobs", get(jobs_handler))
         .route("/api/master/scheduler/jobs", get(jobs_handler))
         .route("/api/evy/policy", get(policy_handler))
-        .route("/api/master/policy", get(policy_handler));
+        .route("/api/master/policy", get(policy_handler))
+        // Phase 6 chat surface — POST only; aliased under /api/master
+        // for parity with v3 dashboards even though there's no v3
+        // equivalent (legacy operators may script either prefix).
+        .route("/api/evy/chat", post(crate::chat::chat_handler))
+        .route("/api/master/chat", post(crate::chat::chat_handler));
 
     // Phase 4 Slice A: optionally serve the operator-console static
     // bundle as a fallback. ServeDir resolves `index.html` automatically

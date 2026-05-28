@@ -86,6 +86,8 @@ use evy_memory::{
 use evy_policy::{check_command_simple, load_policy, Mode};
 use evy_providers::{ClaudeCodeProvider, CodexProvider, DeepSeekProvider, HmacKey};
 use evy_scheduler::{Job, JobAction, JobId, RunOutcome, Scheduler};
+use evy_skills::SkillRegistry;
+use evy_thinking::{AnthropicBackend, AnthropicConfig, LlmBackend, ThinkingPartner};
 use tokio::signal;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -428,11 +430,55 @@ pub async fn run_daemon_with_shutdown(
     let event_broadcaster = EventBroadcaster::default();
     let ask_registry = Arc::new(AskRegistry::new());
 
-    let app_state = Arc::new(DaemonAppState::new(
-        scheduler.clone(),
-        policy.clone(),
-        obs_log.clone(),
-    ));
+    // Phase 5 + 6 — optional skill registry. Loaded if `[skills]` is
+    // enabled; passed to the thinking-partner so the chat surface can
+    // see which skills the model has access to per turn. Failure to
+    // load is logged (not fatal) so a misconfigured catalog doesn't
+    // take down the daemon.
+    let skills_registry = if config.skills.enabled {
+        match SkillRegistry::load(&config.skills.directory) {
+            Ok(reg) => {
+                tracing::info!(
+                    dir = %config.skills.directory.display(),
+                    count = reg.count(),
+                    "skill registry loaded",
+                );
+                Some(Arc::new(reg))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    dir = %config.skills.directory.display(),
+                    "skill registry load failed; continuing without skills",
+                );
+                None
+            }
+        }
+    } else {
+        tracing::info!("skill catalog disabled in config; not loading");
+        None
+    };
+
+    // Phase 6 — optional thinking-partner. Constructed only when the
+    // operator authored `[thinking_partner]` in their TOML. The
+    // anthropic backend is the only production wiring today; "stub"
+    // is intended for smoke tests that need a partner without
+    // touching the live API.
+    let thinking_partner = build_thinking_partner(&config, skills_registry.clone()).await?;
+    if thinking_partner.is_some() {
+        tracing::info!("thinking-partner constructed; chat endpoint is live");
+    } else {
+        tracing::info!("no [thinking_partner] in config; chat endpoint will return 503");
+    }
+
+    let mut app_state = DaemonAppState::new(scheduler.clone(), policy.clone(), obs_log.clone());
+    if let Some(partner) = thinking_partner.clone() {
+        app_state = app_state.with_thinking_partner(partner);
+    }
+    if let Some(skills) = skills_registry.clone() {
+        app_state = app_state.with_skills(skills);
+    }
+    let app_state = Arc::new(app_state);
     let http_server = HttpServer::new(
         config.comms.http.clone().into(),
         event_broadcaster.clone(),
@@ -603,6 +649,75 @@ async fn wait_for_shutdown_signal() -> ShutdownSignal {
     {
         let _ = signal::ctrl_c().await;
         ShutdownSignal::CtrlC
+    }
+}
+
+// ─── Phase 6 — thinking-partner construction ───────────────────────────
+
+/// Construct the thinking-partner from `[thinking_partner]` config.
+///
+/// Returns `Ok(None)` when the section is absent. Returns `Err` when
+/// the section is present but invalid (e.g. requested backend
+/// `"anthropic"` but the configured env var is empty).
+///
+/// The "stub" backend is a fixed-reply implementation useful for
+/// integration tests that need a partner without touching Anthropic.
+async fn build_thinking_partner(
+    config: &Config,
+    skills: Option<Arc<SkillRegistry>>,
+) -> Result<Option<Arc<ThinkingPartner>>> {
+    let Some(cfg) = config.thinking_partner.as_ref() else {
+        return Ok(None);
+    };
+    let backend: Arc<dyn LlmBackend> = match cfg.backend.as_str() {
+        "anthropic" => {
+            let key = std::env::var(&cfg.api_key_env).with_context(|| {
+                format!(
+                    "reading thinking-partner API key from env var {}",
+                    cfg.api_key_env
+                )
+            })?;
+            if key.trim().is_empty() {
+                anyhow::bail!("thinking-partner: env var {} is empty", cfg.api_key_env);
+            }
+            let mut anth_cfg = AnthropicConfig::new(key);
+            if let Some(model) = &cfg.model {
+                anth_cfg.model = model.clone();
+            }
+            if let Some(mt) = cfg.max_tokens {
+                anth_cfg.max_tokens = mt;
+            }
+            let mut backend = AnthropicBackend::new(anth_cfg);
+            if let Some(reg) = skills {
+                backend = backend.with_skills(reg);
+            }
+            Arc::new(backend)
+        }
+        "stub" => Arc::new(StubBackend),
+        other => anyhow::bail!(
+            "thinking-partner: unknown backend {other:?} (expected \"anthropic\" or \"stub\")"
+        ),
+    };
+    let partner = ThinkingPartner::new(backend);
+    Ok(Some(Arc::new(partner)))
+}
+
+/// Stub LLM backend for `[thinking_partner].backend = "stub"`. Always
+/// returns a fixed conversational reply so smoke tests can exercise
+/// the daemon-side wiring without an API key.
+struct StubBackend;
+
+#[async_trait::async_trait]
+impl LlmBackend for StubBackend {
+    async fn respond(
+        &self,
+        _system_prompt: &str,
+        _messages: &[evy_thinking::Message],
+    ) -> evy_thinking::Result<String> {
+        Ok(
+            "stub thinking-partner reply — set [thinking_partner].backend = \"anthropic\" for production"
+                .to_string(),
+        )
     }
 }
 
