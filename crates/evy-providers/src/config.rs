@@ -35,6 +35,13 @@ pub struct ClaudeCodeConfig {
     /// Per-account `CLAUDE_CONFIG_DIR` — picks the auth + settings the
     /// spawned `claude` CLI sees.
     pub claude_config_dir: PathBuf,
+    /// Absolute path to the `claude` binary the worker launches. Using an
+    /// absolute path instead of `command claude` keeps spawning
+    /// independent of the tmux/launchd PATH (which differs from the
+    /// operator's interactive shell — the root of the v3 install/PATH
+    /// split-brain). Built from the daemon config; defaults to
+    /// `~/.local/bin/claude` (the native install).
+    pub claude_bin: PathBuf,
     /// Detached tmux session name that owns the worker windows.
     /// Convention: `claude-<basename(cwd)>`. Must already exist when
     /// `dispatch` is called.

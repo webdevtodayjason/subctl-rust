@@ -68,6 +68,8 @@ async fn dispatch_real_claude_code_worker_and_complete() -> anyhow::Result<()> {
 
     let cfg = ClaudeCodeConfig {
         claude_config_dir: PathBuf::from(config_dir),
+        // Native install — the real spawn test needs a real binary path.
+        claude_bin: PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/bin/claude"),
         tmux_session,
         working_dir: PathBuf::from(working_dir),
         policy_mode: PolicyMode::Trusted,

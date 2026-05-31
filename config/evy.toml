@@ -27,6 +27,12 @@ config_dir = "/tmp/claude-jason"
 tmux_session = "claude-smoke"
 working_dir = "."
 policy_mode = "Trusted"
+# Optional absolute path to the `claude` binary. Omit to default to
+# ~/.local/bin/claude (the native install). Set it to launch workers by
+# absolute path instead of relying on the tmux/launchd PATH — which
+# differs from the operator's interactive shell and is the root of the
+# install/PATH split-brain. Example:
+# claude_bin = "/Users/you/.local/bin/claude"
 
 [providers.codex]
 # `CODEX_HOME` — Codex CLI reads `auth.json` + `config.toml` from here.

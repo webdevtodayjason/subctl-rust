@@ -102,6 +102,7 @@ async fn daemon_boots_with_codex_thinking_partner() -> Result<()> {
             // load_providers check. claude_code + codex are stubs here;
             // the daemon never spawns workers.
             claude_code: Some(ClaudeCodeConfigToml {
+                claude_bin: None,
                 config_dir: dir.path().join("claude-cfg"),
                 tmux_session: "evy-codex-boot-smoke-claude".to_string(),
                 working_dir: dir.path().to_path_buf(),
@@ -210,6 +211,7 @@ async fn daemon_fails_fast_when_codex_section_missing() -> Result<()> {
         policy: PolicyConfig { path: policy_path },
         providers: ProvidersConfig {
             claude_code: Some(ClaudeCodeConfigToml {
+                claude_bin: None,
                 config_dir: dir.path().join("claude-cfg"),
                 tmux_session: "evy-codex-fail-smoke-claude".to_string(),
                 working_dir: dir.path().to_path_buf(),

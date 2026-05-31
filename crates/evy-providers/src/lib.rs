@@ -65,6 +65,7 @@ mod object_safety {
     fn all_phase1_providers_fit_in_a_trait_object_vec() {
         let claude_cfg = ClaudeCodeConfig {
             claude_config_dir: PathBuf::from("/tmp/cfg"),
+            claude_bin: PathBuf::from("/tmp/.local/bin/claude"),
             tmux_session: "claude-test".to_string(),
             working_dir: PathBuf::from("/tmp"),
             policy_mode: PolicyMode::Gated,

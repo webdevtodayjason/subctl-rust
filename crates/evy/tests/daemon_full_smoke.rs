@@ -98,6 +98,7 @@ async fn daemon_full_smoke_serves_health_jobs_and_shuts_down() -> Result<()> {
         policy: PolicyConfig { path: policy_path },
         providers: ProvidersConfig {
             claude_code: Some(ClaudeCodeConfigToml {
+                claude_bin: None,
                 config_dir: dir.path().join("claude-cfg"),
                 tmux_session: "evy-daemon-smoke-claude".to_string(),
                 working_dir: dir.path().to_path_buf(),
@@ -253,6 +254,7 @@ async fn daemon_creates_missing_playbook_dir() -> Result<()> {
         policy: PolicyConfig { path: policy_path },
         providers: ProvidersConfig {
             claude_code: Some(ClaudeCodeConfigToml {
+                claude_bin: None,
                 config_dir: dir.path().join("claude-cfg"),
                 tmux_session: "evy-mkdir-smoke".to_string(),
                 working_dir: dir.path().to_path_buf(),

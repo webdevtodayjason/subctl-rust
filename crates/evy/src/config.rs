@@ -114,6 +114,21 @@ pub struct ClaudeCodeConfigToml {
     pub working_dir: PathBuf,
     /// Policy mode (`"Trusted" | "Gated" | "Sealed"`).
     pub policy_mode: PolicyMode,
+    /// Absolute path to the `claude` binary. Optional — defaults to
+    /// `~/.local/bin/claude` (the native install) when omitted, so
+    /// existing configs keep working. Set this to pin a specific binary
+    /// and stay independent of the launchd/tmux PATH.
+    #[serde(default)]
+    pub claude_bin: Option<PathBuf>,
+}
+
+/// Default `claude` binary path — `~/.local/bin/claude`, the native
+/// install. Falls back to a bare `claude` name only if `$HOME` is unset
+/// (which does not happen for the launchd-run daemon).
+fn default_claude_bin() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(|h| PathBuf::from(h).join(".local/bin/claude"))
+        .unwrap_or_else(|| PathBuf::from("claude"))
 }
 
 impl From<ClaudeCodeConfigToml> for ClaudeCodeConfig {
@@ -125,6 +140,7 @@ impl From<ClaudeCodeConfigToml> for ClaudeCodeConfig {
         // contradict ADR 0011's secret-hygiene rule.
         Self {
             claude_config_dir: toml.config_dir,
+            claude_bin: toml.claude_bin.unwrap_or_else(default_claude_bin),
             tmux_session: toml.tmux_session,
             working_dir: toml.working_dir,
             policy_mode: toml.policy_mode,
@@ -576,10 +592,28 @@ path = "/tmp/policy.toml"
             tmux_session: "s".into(),
             working_dir: PathBuf::from("/w"),
             policy_mode: PolicyMode::Gated,
+            claude_bin: None,
         };
         let c: ClaudeCodeConfig = t.into();
         assert_eq!(c.claude_config_dir, PathBuf::from("/cfg"));
         assert_eq!(c.tmux_session, "s");
+        // Omitted claude_bin → defaults to ~/.local/bin/claude (native).
+        assert!(
+            c.claude_bin.ends_with(".local/bin/claude"),
+            "default claude_bin should be ~/.local/bin/claude, got {:?}",
+            c.claude_bin
+        );
+
+        // Explicit claude_bin is honored verbatim.
+        let t2 = ClaudeCodeConfigToml {
+            config_dir: PathBuf::from("/cfg"),
+            tmux_session: "s".into(),
+            working_dir: PathBuf::from("/w"),
+            policy_mode: PolicyMode::Gated,
+            claude_bin: Some(PathBuf::from("/opt/claude/bin/claude")),
+        };
+        let c2: ClaudeCodeConfig = t2.into();
+        assert_eq!(c2.claude_bin, PathBuf::from("/opt/claude/bin/claude"));
     }
 
     #[test]

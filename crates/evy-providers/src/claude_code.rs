@@ -107,12 +107,16 @@ impl Provider for ClaudeCodeProvider {
         )
         .await?;
 
-        // `command claude` bypasses any shell function shadow (matches
-        // v3 teams.sh). `CLAUDE_CONFIG_DIR` is passed inline so that even
-        // if the operator's session has a different one set in env, this
-        // worker stays pinned to the configured account.
-        let config_dir = path_to_arg(&self.config.claude_config_dir)?;
-        let launch_line = format!("CLAUDE_CONFIG_DIR={config_dir} command claude");
+        // Launch `claude` by ABSOLUTE path (not `command claude`) so the
+        // worker resolves the same native binary regardless of the
+        // tmux/launchd PATH — which differs from the operator's
+        // interactive shell and is the root of the v3 install/PATH
+        // split-brain. An absolute path also bypasses any `claude`
+        // shell-function shadow. `CLAUDE_CONFIG_DIR` is passed inline so
+        // the worker stays pinned to its configured account even if the
+        // operator's session has a different one set.
+        let launch_line =
+            build_launch_line(&self.config.claude_config_dir, &self.config.claude_bin)?;
 
         debug!(launch = %launch_line, "launching claude CLI in worker window");
         tmux::send_keys(
@@ -346,11 +350,37 @@ fn path_to_arg(p: &Path) -> Result<String> {
         })
 }
 
+/// Build the worker launch command: an inline `CLAUDE_CONFIG_DIR=…`
+/// assignment followed by the `claude` binary invoked by ABSOLUTE path
+/// (never `command claude`), so the spawned worker resolves the same
+/// native binary regardless of the tmux/launchd PATH.
+fn build_launch_line(claude_config_dir: &Path, claude_bin: &Path) -> Result<String> {
+    let config_dir = path_to_arg(claude_config_dir)?;
+    let claude_bin = path_to_arg(claude_bin)?;
+    Ok(format!("CLAUDE_CONFIG_DIR={config_dir} {claude_bin}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
     use uuid::Uuid;
+
+    #[test]
+    fn launch_line_uses_absolute_claude_binary_not_path_lookup() {
+        let line = build_launch_line(
+            Path::new("/home/op/.claude-jason"),
+            Path::new("/home/op/.local/bin/claude"),
+        )
+        .unwrap();
+        assert!(line.contains("CLAUDE_CONFIG_DIR=/home/op/.claude-jason"));
+        assert!(line.contains("/home/op/.local/bin/claude"));
+        // The whole point of A2: never PATH-relative `command claude`.
+        assert!(
+            !line.contains("command claude"),
+            "launch line must not depend on PATH resolution: {line}"
+        );
+    }
 
     fn fixture_mandate() -> Mandate {
         // Fixed UUID for deterministic golden-test output.

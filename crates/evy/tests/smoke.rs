@@ -56,6 +56,7 @@ async fn phase1_smoke_test_runs_cron_job_and_exits_clean() -> anyhow::Result<()>
         },
         providers: ProvidersConfig {
             claude_code: Some(ClaudeCodeConfigToml {
+                claude_bin: None,
                 config_dir: dir.path().join("claude-cfg"),
                 tmux_session: "evy-smoke-claude".to_string(),
                 working_dir: dir.path().to_path_buf(),
