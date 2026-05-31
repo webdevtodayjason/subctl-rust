@@ -90,5 +90,7 @@ pub use lm_studio::{
     DEFAULT_TIMEOUT as DEFAULT_LM_STUDIO_TIMEOUT,
 };
 pub use partner::{MessageHook, ThinkingPartner};
-pub use session::{Message, Role, Session, SessionId, SessionStatus};
-pub use templates::{conclusion_user_turn, kickoff_user_turn, planning_system_prompt};
+pub use session::{Message, Role, Session, SessionId, SessionMode, SessionStatus};
+pub use templates::{
+    conclusion_user_turn, conversational_system_prompt, kickoff_user_turn, planning_system_prompt,
+};

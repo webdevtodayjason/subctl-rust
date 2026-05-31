@@ -163,11 +163,12 @@ async fn sessions_list_returns_open_sessions_newest_first() {
     assert_eq!(body.sessions[0].id, ids[2]);
     assert_eq!(body.sessions[1].id, ids[1]);
     assert_eq!(body.sessions[2].id, ids[0]);
-    // preview comes from topic.
+    // Conversational sessions carry no topic, so preview falls back to
+    // the first operator message — what the operator actually said.
     assert_eq!(body.sessions[0].preview, "third");
-    // message_count includes the synthetic system marker, kickoff
-    // turn, and partner's opening question = 3.
-    assert_eq!(body.sessions[0].message_count, 3);
+    // Conversational open = operator turn + partner reply (no synthetic
+    // system marker or kickoff turn, unlike a planning session).
+    assert_eq!(body.sessions[0].message_count, 2);
     shutdown.cancel();
 }
 

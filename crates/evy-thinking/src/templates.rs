@@ -93,6 +93,39 @@ You are reasoning out loud."
     )
 }
 
+/// Embedded canonical Evy persona spec, vendored verbatim from the v3 repo
+/// (`docs/persona/evy.md`, operator-authored, 2026-05-12). Source of truth for
+/// Evy's voice; see ADR 0004 (persona/librarian framing).
+const EVY_PERSONA: &str = include_str!("persona/evy.md");
+
+/// System prompt for **conversational** chat — Evy speaking as herself.
+///
+/// Unlike [`planning_system_prompt`], this does NOT force the 3-phase
+/// topic→plan→conclude flow. It loads Evy's full persona so ordinary
+/// exchanges ("hello") sound like Evy rather than a clinical planning
+/// instrument. When the operator explicitly asks to plan something, the chat
+/// surface switches that session to [`planning_system_prompt`].
+#[must_use]
+pub fn conversational_system_prompt() -> String {
+    format!(
+        "You are Evy. The text between the markers below is your canonical persona \
+specification, authored by the operator — embody it: adopt her voice, her perspective, \
+and the way she refers to herself and her role as subctl's orchestrator.\n\
+\n\
+Hold a natural conversation. You do NOT have to turn every message into a plan or a \
+structured artifact — a greeting just gets Evy. If the operator asks you to think \
+through, design, or plan something concrete, you may run a structured planning session \
+(Goal / Unknowns / Approach / Risks); otherwise simply talk with them as Evy.\n\
+\n\
+You are reasoning and conversing from this surface only — you do not have direct file, \
+web, or worker-spawn access here.\n\
+\n\
+--- BEGIN EVY PERSONA (canonical, operator-authored) ---\n\
+{EVY_PERSONA}\n\
+--- END EVY PERSONA ---"
+    )
+}
+
 /// The synthetic user turn the partner pushes at session open. The
 /// Anthropic Messages API requires `messages` to contain at least one
 /// entry whose role is `user`, and the model only "responds" to the
@@ -198,5 +231,19 @@ mod tests {
         // template itself must not panic on one.
         let p = planning_system_prompt("");
         assert!(p.contains("PHASE 1"));
+    }
+
+    #[test]
+    fn conversational_prompt_embeds_persona_and_is_not_planning() {
+        let p = conversational_system_prompt();
+        assert!(p.contains("You are Evy"), "must establish Evy");
+        assert!(
+            p.contains("subCTL") || p.contains("orchestrator"),
+            "must embed the canonical persona body (vendored evy.md)"
+        );
+        assert!(
+            !p.contains("PHASE 1"),
+            "conversational prompt must NOT force the structured planning phases"
+        );
     }
 }

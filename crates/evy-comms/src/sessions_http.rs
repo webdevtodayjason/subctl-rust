@@ -16,15 +16,15 @@
 //! sessions become durable the wire shape gains no fields, just gains
 //! continuity across restarts.
 //!
-//! # Why `preview` derives from `session.topic`
+//! # How `preview` is derived
 //!
-//! On a freshly opened session the message log opens with a `Role::System`
-//! "Session opened: <topic>" marker, then a synthetic kickoff template
-//! from [`evy_thinking::templates::kickoff_user_turn`] — neither is what
-//! an operator typed. The operator's actual ask survives as
-//! `Session::topic`, which is what every TUI surface wants to render in
-//! the sidebar. We truncate at 80 chars so long topics don't blow up
-//! a list view.
+//! A **planning** session's message log opens with a `Role::System`
+//! "Session opened: <topic>" marker and a synthetic kickoff turn from
+//! [`evy_thinking::templates::kickoff_user_turn`] — neither is what an
+//! operator typed — so the operator's actual ask is read from
+//! `Session::topic`. A **conversational** session has no topic, so the
+//! preview falls back to its first `Role::Operator` message (what the
+//! operator actually said). Truncated at 80 chars for the sidebar.
 
 use axum::{
     extract::{Path, State},
@@ -55,11 +55,13 @@ pub struct SessionSummary {
     pub started_at: DateTime<Utc>,
     /// Last operator-or-partner activity.
     pub last_message_at: DateTime<Utc>,
-    /// Total messages in the in-memory log, including the synthetic
-    /// system marker and kickoff turn.
+    /// Total messages in the in-memory log. Planning sessions include
+    /// the synthetic system marker + kickoff turn; conversational
+    /// sessions do not.
     pub message_count: usize,
-    /// Truncated topic for sidebar rendering. See the module docs for
-    /// why we read from `session.topic` rather than `messages[0]`.
+    /// Truncated text for sidebar rendering — the topic for planning
+    /// sessions, the first operator message for conversational ones.
+    /// See the module docs.
     pub preview: String,
     /// Lifecycle state — `active`, `concluded`, or `timed_out`.
     pub status: SessionStatus,
@@ -132,16 +134,19 @@ pub(crate) async fn sessions_list_handler(
     let out: Vec<SessionSummary> = sessions
         .into_iter()
         .map(|s| {
-            // Operator-typed text the TUI wants to display. Sessions
-            // opened via `start_session` always have at least one
-            // operator message (the synthetic kickoff turn); the topic
-            // field carries the actual operator ask.
-            let preview = truncate_preview(&s.topic);
-            // Count partner+operator turns visible to a human — the
-            // synthetic system marker and kickoff turn are still
-            // included for shape stability; clients that want to
-            // suppress them can filter on role from the chat thread.
-            let _ = Role::System; // doc reference — see partner.rs
+            // Operator-typed text for the sidebar. Planning sessions
+            // carry the operator's ask in `topic`; conversational
+            // sessions have no topic, so fall back to their first
+            // operator message (synthetic turns / Evy's replies skipped).
+            let preview_source = if s.topic.trim().is_empty() {
+                s.messages
+                    .iter()
+                    .find(|m| m.role == Role::Operator)
+                    .map_or("", |m| m.content.as_str())
+            } else {
+                s.topic.as_str()
+            };
+            let preview = truncate_preview(preview_source);
             SessionSummary {
                 id: s.id.0,
                 started_at: s.started_at,
