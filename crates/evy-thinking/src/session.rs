@@ -99,6 +99,27 @@ pub enum SessionStatus {
     TimedOut,
 }
 
+/// Which system prompt + UX a session runs under.
+///
+/// Fixed at creation. [`Session::new`] opens a [`SessionMode::Planning`]
+/// session (the structured topic → plan → conclude flow);
+/// [`Session::conversational`] opens a [`SessionMode::Conversational`]
+/// one (Evy speaking as herself). The [`ThinkingPartner`] consults the
+/// mode on every turn to pick the system prompt, so follow-up turns stay
+/// in the session's mode.
+///
+/// [`ThinkingPartner`]: crate::ThinkingPartner
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMode {
+    /// Natural conversation — Evy's persona, no forced planning UX.
+    Conversational,
+    /// Structured topic → plan → conclude flow (the original Phase 6
+    /// behaviour, and the back-compat default for pre-mode sessions).
+    #[default]
+    Planning,
+}
+
 /// In-memory record of one planning conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -114,9 +135,15 @@ pub struct Session {
     pub last_activity: DateTime<Utc>,
     /// Lifecycle state.
     pub status: SessionStatus,
-    /// Chronological message log. The first message is always a
-    /// `Role::System` "session opened" marker for surfaces that want
-    /// it; the second is the partner's opening clarifying questions.
+    /// Which system prompt + UX this session runs under. Defaults to
+    /// [`SessionMode::Planning`] when absent from serialized data
+    /// (back-compat: pre-mode sessions were always planning).
+    #[serde(default)]
+    pub mode: SessionMode,
+    /// Chronological message log. For a planning session the first
+    /// message is a `Role::System` "session opened" marker and the
+    /// second is the partner's opening clarifying questions; for a
+    /// conversational session the first message is the operator's turn.
     pub messages: Vec<Message>,
 }
 
@@ -134,6 +161,25 @@ impl Session {
             started_at: now,
             last_activity: now,
             status: SessionStatus::Active,
+            mode: SessionMode::Planning,
+            messages: Vec::new(),
+        }
+    }
+
+    /// Fresh **conversational** session — Evy speaking as herself, with
+    /// no planning topic. `messages` is empty; the
+    /// [`ThinkingPartner`](crate::ThinkingPartner) pushes the operator's
+    /// first turn and Evy's reply before handing the id to the caller.
+    #[must_use]
+    pub fn conversational() -> Self {
+        let now = Utc::now();
+        Self {
+            id: SessionId::new(),
+            topic: String::new(),
+            started_at: now,
+            last_activity: now,
+            status: SessionStatus::Active,
+            mode: SessionMode::Conversational,
             messages: Vec::new(),
         }
     }
@@ -231,5 +277,41 @@ mod tests {
         let a = SessionId::default();
         let b = SessionId::default();
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn session_mode_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&SessionMode::Conversational).unwrap(),
+            "\"conversational\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SessionMode::Planning).unwrap(),
+            "\"planning\""
+        );
+    }
+
+    #[test]
+    fn new_is_planning_conversational_is_conversational() {
+        assert_eq!(Session::new("t".to_string()).mode, SessionMode::Planning);
+        let c = Session::conversational();
+        assert_eq!(c.mode, SessionMode::Conversational);
+        assert!(c.topic.is_empty(), "conversational sessions carry no topic");
+    }
+
+    #[test]
+    fn mode_defaults_to_planning_when_absent() {
+        // A session serialized before `mode` existed has no `mode` key;
+        // it must deserialize as Planning (the only mode that existed).
+        let json = r#"{
+            "id": "00000000-0000-0000-0000-000000000000",
+            "topic": "legacy",
+            "started_at": "2026-01-01T00:00:00Z",
+            "last_activity": "2026-01-01T00:00:00Z",
+            "status": "active",
+            "messages": []
+        }"#;
+        let s: Session = serde_json::from_str(json).expect("deserialize pre-mode session");
+        assert_eq!(s.mode, SessionMode::Planning);
     }
 }

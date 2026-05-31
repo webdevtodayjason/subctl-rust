@@ -16,8 +16,10 @@ use tracing::{debug, info};
 
 use crate::backend::{LlmBackend, StreamChunk};
 use crate::error::{Result, ThinkingError};
-use crate::session::{Message, Role, Session, SessionId, SessionStatus};
-use crate::templates::{conclusion_user_turn, kickoff_user_turn, planning_system_prompt};
+use crate::session::{Message, Role, Session, SessionId, SessionMode, SessionStatus};
+use crate::templates::{
+    conclusion_user_turn, conversational_system_prompt, kickoff_user_turn, planning_system_prompt,
+};
 
 /// Type alias for the per-message hook the daemon wires in.
 ///
@@ -27,6 +29,19 @@ use crate::templates::{conclusion_user_turn, kickoff_user_turn, planning_system_
 /// available; we kept the signature sync to keep the public API simple
 /// for surfaces that only want to print messages.
 pub type MessageHook = Arc<dyn Fn(&Message) + Send + Sync>;
+
+/// Pick the system prompt for a session from its [`SessionMode`].
+///
+/// Conversational sessions speak with Evy's persona; planning sessions
+/// run the structured topic → plan → conclude flow. Consulted on every
+/// turn (`send` / `stream_send`) so follow-ups stay in the session's
+/// mode.
+fn system_prompt_for(session: &Session) -> String {
+    match session.mode {
+        SessionMode::Conversational => conversational_system_prompt(),
+        SessionMode::Planning => planning_system_prompt(&session.topic),
+    }
+}
 
 /// The thinking-partner surface. Cheap to clone if you wrap it in an
 /// `Arc` — internally already `Arc`-shares the backend and sessions
@@ -121,6 +136,53 @@ impl ThinkingPartner {
         Ok(id)
     }
 
+    /// Open a new **conversational** session — Evy speaking as herself.
+    ///
+    /// Unlike [`start_session`](Self::start_session) this requires no
+    /// "topic": the operator's `message` is the first real user turn,
+    /// there is no synthetic kickoff, and the system prompt is
+    /// [`conversational_system_prompt`]. Evy's reply lives on the last
+    /// [`Role::Partner`] message — the same shape the chat surface reads
+    /// for a planning open, so the HTTP layer is uniform.
+    ///
+    /// # Errors
+    /// - [`ThinkingError::Input`] if `message` is blank.
+    /// - Any error from the underlying backend's `respond` call.
+    pub async fn start_conversation(&self, message: String) -> Result<SessionId> {
+        if message.trim().is_empty() {
+            return Err(ThinkingError::Input("message is empty".to_string()));
+        }
+
+        let mut session = Session::conversational();
+        let id = session.id;
+
+        // The operator's own words are the first user turn — no
+        // "Session opened: <topic>" marker, no synthetic kickoff. Evy
+        // simply replies to what they said.
+        let op_msg = Message::new(id, Role::Operator, message);
+        self.emit(&op_msg);
+        session.push(op_msg);
+
+        let system_prompt = system_prompt_for(&session);
+        let reply = self
+            .backend
+            .respond(&system_prompt, &session.messages)
+            .await?;
+
+        let partner_msg = Message::new(id, Role::Partner, reply);
+        self.emit(&partner_msg);
+        session.push(partner_msg);
+
+        info!(
+            session = %id.0,
+            turns = session.messages.len(),
+            "evy-thinking: conversation opened",
+        );
+
+        self.sessions.lock().await.insert(id, session);
+        Ok(id)
+    }
+
     /// Append an operator turn and produce the partner's reply.
     ///
     /// # Errors
@@ -159,7 +221,7 @@ impl ThinkingPartner {
             // hook invocations on the sessions mutex.
             self.emit(&op_msg);
             session.push(op_msg);
-            let prompt = planning_system_prompt(&session.topic);
+            let prompt = system_prompt_for(session);
             (prompt, session.messages.clone())
         };
 
@@ -234,6 +296,51 @@ impl ThinkingPartner {
         Ok(id)
     }
 
+    /// Streaming variant of
+    /// [`start_conversation`](Self::start_conversation).
+    ///
+    /// Opens a fresh conversational session, streams Evy's reply to the
+    /// operator's first `message` into `sink`, then records it. Returns
+    /// the new [`SessionId`] for the SSE `done` frame.
+    ///
+    /// # Errors
+    /// Same as [`start_conversation`](Self::start_conversation).
+    pub async fn stream_start_conversation(
+        &self,
+        message: String,
+        sink: &mpsc::Sender<StreamChunk>,
+    ) -> Result<SessionId> {
+        if message.trim().is_empty() {
+            return Err(ThinkingError::Input("message is empty".to_string()));
+        }
+
+        let mut session = Session::conversational();
+        let id = session.id;
+
+        let op_msg = Message::new(id, Role::Operator, message);
+        self.emit(&op_msg);
+        session.push(op_msg);
+
+        let system_prompt = system_prompt_for(&session);
+        let reply = self
+            .backend
+            .stream_respond(&system_prompt, &session.messages, sink)
+            .await?;
+
+        let partner_msg = Message::new(id, Role::Partner, reply);
+        self.emit(&partner_msg);
+        session.push(partner_msg);
+
+        info!(
+            session = %id.0,
+            turns = session.messages.len(),
+            "evy-thinking: streaming conversation opened",
+        );
+
+        self.sessions.lock().await.insert(id, session);
+        Ok(id)
+    }
+
     /// Streaming variant of [`send`](Self::send).
     ///
     /// Same lock-discipline as the blocking path:
@@ -267,7 +374,7 @@ impl ThinkingPartner {
             let op_msg = Message::new(id, Role::Operator, operator_input);
             self.emit(&op_msg);
             session.push(op_msg);
-            let prompt = planning_system_prompt(&session.topic);
+            let prompt = system_prompt_for(session);
             (prompt, session.messages.clone())
         };
 
@@ -518,6 +625,62 @@ mod tests {
         assert_eq!(session.messages.len(), 9);
         let last_partner = session.last_of(Role::Partner).expect("partner replied");
         assert!(last_partner.content.contains("Next steps"));
+    }
+
+    #[tokio::test]
+    async fn start_conversation_uses_persona_prompt_and_no_kickoff() {
+        let (backend, captures) =
+            ScriptedBackend::new(vec!["Hey — good to see you. What are we getting into?"]);
+        let partner = ThinkingPartner::new(backend);
+        let id = partner.start_conversation("hello".into()).await.unwrap();
+
+        let session = partner.session(id).await.unwrap().expect("session exists");
+        assert_eq!(session.mode, SessionMode::Conversational);
+        assert_eq!(session.status, SessionStatus::Active);
+        // Operator's own turn + Evy's reply — NO "session opened" marker,
+        // NO synthetic kickoff turn.
+        assert_eq!(session.messages.len(), 2, "operator turn + partner reply");
+        assert_eq!(session.messages[0].role, Role::Operator);
+        assert_eq!(session.messages[0].content, "hello");
+        assert_eq!(session.messages[1].role, Role::Partner);
+
+        let caps = captures.lock().unwrap();
+        assert_eq!(caps.len(), 1, "one backend call to open the conversation");
+        // The conversational persona prompt, NOT the planning instrument.
+        assert!(caps[0].0.contains("Hold a natural conversation"));
+        assert!(caps[0].0.contains("You are Evy"));
+        // History is exactly the operator's real message — no kickoff.
+        assert_eq!(caps[0].1.len(), 1);
+        assert_eq!(caps[0].1[0].role, Role::Operator);
+        assert_eq!(caps[0].1[0].content, "hello");
+    }
+
+    #[tokio::test]
+    async fn start_conversation_rejects_blank_message() {
+        let (backend, _) = ScriptedBackend::new(vec![]);
+        let partner = ThinkingPartner::new(backend);
+        let err = partner
+            .start_conversation("   ".into())
+            .await
+            .expect_err("blank message must fail");
+        assert!(matches!(err, ThinkingError::Input(_)));
+    }
+
+    #[tokio::test]
+    async fn conversational_send_stays_conversational() {
+        let (backend, captures) =
+            ScriptedBackend::new(vec!["Hey there.", "Still just chatting, no plan."]);
+        let partner = ThinkingPartner::new(backend);
+        let id = partner.start_conversation("hi".into()).await.unwrap();
+        let _ = partner.send(id, "how's it going?".into()).await.unwrap();
+
+        let caps = captures.lock().unwrap();
+        assert_eq!(caps.len(), 2);
+        // Both the open AND the follow-up use the conversational prompt —
+        // the session's mode is honoured on every turn, proving `send`
+        // is mode-aware (not hardcoded to the planning prompt).
+        assert!(caps[0].0.contains("Hold a natural conversation"));
+        assert!(caps[1].0.contains("Hold a natural conversation"));
     }
 
     #[tokio::test]
