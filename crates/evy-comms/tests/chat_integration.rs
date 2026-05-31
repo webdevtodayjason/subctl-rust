@@ -107,8 +107,9 @@ async fn post_chat_returns_503_when_partner_unavailable() {
 
 #[tokio::test]
 async fn post_chat_opens_new_session_when_session_id_omitted() {
-    // Scripted reply for the kickoff turn (the partner's opening
-    // clarifying questions).
+    // Opening now defaults to a *conversational* session; this
+    // prompt-agnostic backend returns the canned reply regardless of
+    // mode. (The mode is asserted in the CapturingBackend tests below.)
     let backend = ScriptedBackend::new(vec!["1. What's the target?\n2. What's the budget?"]);
     let partner = Arc::new(ThinkingPartner::new(backend));
     let state = Arc::new(ChatTestState {
@@ -250,5 +251,135 @@ async fn post_chat_master_alias_route_also_works() {
     assert_eq!(res.status(), 200);
     let body: ChatResponse = res.json().await.unwrap();
     assert_eq!(body.response, "via alias");
+    shutdown.cancel();
+}
+
+/// Backend that records the system prompt of each call so a test can
+/// assert which persona/mode the handler selected, returning canned
+/// replies in order.
+struct CapturingBackend {
+    replies: StdMutex<Vec<String>>,
+    prompts: Arc<StdMutex<Vec<String>>>,
+}
+
+impl CapturingBackend {
+    fn new(replies: Vec<&str>) -> (Arc<Self>, Arc<StdMutex<Vec<String>>>) {
+        let prompts = Arc::new(StdMutex::new(Vec::new()));
+        let b = Arc::new(Self {
+            replies: StdMutex::new(replies.into_iter().map(String::from).collect()),
+            prompts: prompts.clone(),
+        });
+        (b, prompts)
+    }
+}
+
+#[async_trait]
+impl LlmBackend for CapturingBackend {
+    async fn respond(&self, system_prompt: &str, _messages: &[Message]) -> ThinkingResult<String> {
+        self.prompts.lock().unwrap().push(system_prompt.to_string());
+        let mut q = self.replies.lock().unwrap();
+        if q.is_empty() {
+            Err(ThinkingError::BackendRefused(
+                "capturing backend ran out".into(),
+            ))
+        } else {
+            Ok(q.remove(0))
+        }
+    }
+}
+
+#[tokio::test]
+async fn post_chat_opens_conversational_session_by_default() {
+    let (backend, prompts) = CapturingBackend::new(vec!["Hey — good to see you."]);
+    let partner = Arc::new(ThinkingPartner::new(backend));
+    let state = Arc::new(ChatTestState {
+        partner: Some(partner),
+        skills: None,
+    });
+    let (base, shutdown) = spawn(state).await;
+
+    let res = reqwest::Client::new()
+        .post(format!("{base}/api/evy/chat"))
+        .json(&ChatRequest {
+            session_id: None,
+            message: "hello".into(),
+        })
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(res.status(), 200);
+    let body: ChatResponse = res.json().await.unwrap();
+    assert_eq!(body.response, "Hey — good to see you.");
+
+    // The handler must have opened a CONVERSATIONAL session — the system
+    // prompt the backend saw is Evy's persona, not the planning
+    // instrument. This is the proof that "hello → Evy" at the HTTP layer.
+    let captured = prompts.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    assert!(
+        captured[0].contains("Hold a natural conversation"),
+        "default open must use the conversational persona prompt"
+    );
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn post_chat_slash_plan_opens_planning_session() {
+    let (backend, prompts) = CapturingBackend::new(vec!["1. What's the target?"]);
+    let partner = Arc::new(ThinkingPartner::new(backend));
+    let state = Arc::new(ChatTestState {
+        partner: Some(partner),
+        skills: None,
+    });
+    let (base, shutdown) = spawn(state).await;
+
+    let res = reqwest::Client::new()
+        .post(format!("{base}/api/evy/chat"))
+        .json(&ChatRequest {
+            session_id: None,
+            message: "/plan migrate postgres".into(),
+        })
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(res.status(), 200);
+
+    // `/plan <topic>` routes to the planning prompt with the topic
+    // extracted (the planning prompt embeds the topic verbatim).
+    let captured = prompts.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    assert!(
+        captured[0].contains("migrate postgres"),
+        "planning prompt must embed the extracted topic, not the /plan literal"
+    );
+    assert!(
+        !captured[0].contains("Hold a natural conversation"),
+        "/plan must NOT use the conversational prompt"
+    );
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn post_chat_bare_plan_requires_a_topic() {
+    let (backend, _prompts) = CapturingBackend::new(vec!["unused"]);
+    let partner = Arc::new(ThinkingPartner::new(backend));
+    let state = Arc::new(ChatTestState {
+        partner: Some(partner),
+        skills: None,
+    });
+    let (base, shutdown) = spawn(state).await;
+
+    let res = reqwest::Client::new()
+        .post(format!("{base}/api/evy/chat"))
+        .json(&ChatRequest {
+            session_id: None,
+            message: "/plan".into(),
+        })
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(res.status(), 400);
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(body["kind"], "bad_request");
     shutdown.cancel();
 }

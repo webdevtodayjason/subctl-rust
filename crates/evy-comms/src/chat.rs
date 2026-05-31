@@ -35,11 +35,14 @@
 //!
 //! # Session lifecycle mapping
 //!
-//! - `session_id: null` → [`ThinkingPartner::start_session`] with the
-//!   operator's message as the topic. The response carries the freshly
-//!   minted session id plus the partner's opening clarifying questions.
+//! - `/plan <topic>` (in any request) → [`ThinkingPartner::start_session`]:
+//!   opens a fresh structured **planning** session (topic → plan →
+//!   conclude). The response carries the new id + the opening questions.
+//! - `session_id: null` (ordinary message) →
+//!   [`ThinkingPartner::start_conversation`]: opens a **conversational**
+//!   session — Evy speaking as herself. This is the default.
 //! - `session_id: Some(id)` → [`ThinkingPartner::send`] against the
-//!   existing session.
+//!   existing session, which remembers its own mode.
 //!
 //! # `skills_loaded`
 //!
@@ -51,6 +54,7 @@
 //! Phase 7 input notes.
 //!
 //! [`ThinkingPartner::start_session`]: evy_thinking::ThinkingPartner::start_session
+//! [`ThinkingPartner::start_conversation`]: evy_thinking::ThinkingPartner::start_conversation
 //! [`ThinkingPartner::send`]: evy_thinking::ThinkingPartner::send
 
 use std::convert::Infallible;
@@ -79,8 +83,8 @@ use crate::http::HttpState;
 /// JSON body the operator's chat client POSTs.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ChatRequest {
-    /// `None` = open a new session using `message` as the topic.
-    /// `Some(id)` = append `message` to the existing session.
+    /// `None` = open a new conversational session (or a planning session
+    /// when `message` is `/plan <topic>`). `Some(id)` = append to it.
     #[serde(default)]
     pub session_id: Option<Uuid>,
     /// Operator text. Must be non-empty (trimmed).
@@ -287,7 +291,51 @@ pub(crate) async fn chat_handler(
     }
 }
 
-/// Blocking JSON branch — the original Phase 6 behaviour, unchanged.
+/// Read the opening partner reply off a freshly-opened session, with the
+/// status sanity-check applied to every open. Shared by the
+/// conversational and `/plan` open paths.
+async fn opening_reply(partner: &ThinkingPartner, id: SessionId) -> Result<String, ChatError> {
+    let session = partner
+        .session(id)
+        .await
+        .map_err(|e| map_thinking_error(e, Some(id.0)))?
+        .ok_or_else(|| ChatError::Internal {
+            message: "session vanished after open".to_string(),
+        })?;
+    let opening = session
+        .last_of(Role::Partner)
+        .ok_or_else(|| ChatError::Internal {
+            message: "session opened but partner did not produce a reply".to_string(),
+        })?;
+    // Sanity-check the session status — if a timeout fired between start
+    // and read, surface that instead of pretending.
+    if session.status != SessionStatus::Active {
+        return Err(ChatError::SessionClosed {
+            session_id: id.0,
+            message: format!("session opened but is now {:?}", session.status),
+        });
+    }
+    Ok(opening.content.clone())
+}
+
+/// Recognise a leading `/plan` command (the planning trigger).
+///
+/// Returns `Some(topic)` for `/plan` or `/plan <topic>` (topic untrimmed,
+/// may be empty/whitespace for a bare `/plan`), and `None` for ordinary
+/// chat. Parsed server-side so every surface (TUI, Discord, Telegram,
+/// curl) shares one trigger without re-implementing it. `"/planning …"`
+/// is NOT the command.
+fn parse_plan_command(msg: &str) -> Option<&str> {
+    let rest = msg.strip_prefix("/plan")?;
+    match rest.chars().next() {
+        None => Some(""),
+        Some(c) if c.is_whitespace() => Some(rest),
+        Some(_) => None,
+    }
+}
+
+/// Blocking JSON branch — routes by mode: `/plan` → planning, a fresh
+/// message → conversational (default), an existing id → append.
 async fn chat_handler_blocking(
     state: HttpState,
     body: ChatRequest,
@@ -307,41 +355,34 @@ async fn chat_handler_blocking(
         });
     }
 
-    // Branch on session_id presence: None opens a new session with the
-    // message as the topic; Some appends.
-    let (session_id, response_text) = match body.session_id {
-        None => {
-            let id = partner
-                .start_session(msg.to_string())
-                .await
-                .map_err(|e| map_thinking_error(e, None))?;
-            // The partner's opening clarifying questions live on the
-            // last Partner message of the session. Pull them directly
-            // so the response matches the chat-client expectation: one
-            // request → one response string.
-            let session = partner
-                .session(id)
-                .await
-                .map_err(|e| map_thinking_error(e, Some(id.0)))?
-                .ok_or_else(|| ChatError::Internal {
-                    message: "session vanished after start_session".to_string(),
-                })?;
-            let opening = session
-                .last_of(Role::Partner)
-                .ok_or_else(|| ChatError::Internal {
-                    message: "session opened but partner did not produce a reply".to_string(),
-                })?;
-            // Sanity-check the session status — if a timeout fired
-            // between start and read, surface that instead of pretending.
-            if session.status != SessionStatus::Active {
-                return Err(ChatError::SessionClosed {
-                    session_id: id.0,
-                    message: format!("session opened but is now {:?}", session.status),
+    // Routing:
+    // - `/plan <topic>` (any request) opens a NEW *planning* session.
+    // - otherwise `session_id: None` opens a *conversational* session —
+    //   Evy as herself (the default).
+    // - `session_id: Some(id)` appends to the existing session, which
+    //   remembers its own mode.
+    let (session_id, response_text) = match (parse_plan_command(msg), body.session_id) {
+        (Some(topic), _) => {
+            let topic = topic.trim();
+            if topic.is_empty() {
+                return Err(ChatError::BadRequest {
+                    message: "usage: /plan <topic>".to_string(),
                 });
             }
-            (id.0, opening.content.clone())
+            let id = partner
+                .start_session(topic.to_string())
+                .await
+                .map_err(|e| map_thinking_error(e, None))?;
+            (id.0, opening_reply(partner.as_ref(), id).await?)
         }
-        Some(raw_id) => {
+        (None, None) => {
+            let id = partner
+                .start_conversation(msg.to_string())
+                .await
+                .map_err(|e| map_thinking_error(e, None))?;
+            (id.0, opening_reply(partner.as_ref(), id).await?)
+        }
+        (None, Some(raw_id)) => {
             let id = SessionId(raw_id);
             let reply = partner
                 .send(id, msg.to_string())
@@ -466,13 +507,29 @@ async fn stream_worker(
     let session_id_for_worker = session_id;
     let msg_for_worker = msg.clone();
     let drive: tokio::task::JoinHandle<Result<Uuid, ChatError>> = tokio::spawn(async move {
-        let result = match session_id_for_worker {
-            None => partner_arc
-                .stream_start_session(msg_for_worker, &chunk_tx_inner)
+        // Own the topic so the borrow of `msg_for_worker` ends before we
+        // move it into the conversational / send arms below.
+        let plan_topic = parse_plan_command(&msg_for_worker).map(|t| t.trim().to_string());
+        let result = match (plan_topic, session_id_for_worker) {
+            (Some(topic), _) => {
+                if topic.is_empty() {
+                    Err(ChatError::BadRequest {
+                        message: "usage: /plan <topic>".to_string(),
+                    })
+                } else {
+                    partner_arc
+                        .stream_start_session(topic, &chunk_tx_inner)
+                        .await
+                        .map(|id| id.0)
+                        .map_err(|e| map_thinking_error(e, None))
+                }
+            }
+            (None, None) => partner_arc
+                .stream_start_conversation(msg_for_worker, &chunk_tx_inner)
                 .await
                 .map(|id| id.0)
                 .map_err(|e| map_thinking_error(e, None)),
-            Some(raw) => {
+            (None, Some(raw)) => {
                 let id = SessionId(raw);
                 partner_arc
                     .stream_send(id, msg_for_worker, &chunk_tx_inner)
@@ -682,5 +739,16 @@ mod tests {
         assert_eq!(back.session_id, resp.session_id);
         assert_eq!(back.response, resp.response);
         assert_eq!(back.skills_loaded, resp.skills_loaded);
+    }
+
+    #[test]
+    fn parse_plan_command_recognises_the_trigger() {
+        assert_eq!(parse_plan_command("/plan migrate db"), Some(" migrate db"));
+        assert_eq!(parse_plan_command("/plan"), Some(""));
+        assert_eq!(parse_plan_command("/plan   "), Some("   "));
+        // Not the command:
+        assert_eq!(parse_plan_command("hello"), None);
+        assert_eq!(parse_plan_command("/planning the week"), None);
+        assert_eq!(parse_plan_command("tell me /plan"), None);
     }
 }
