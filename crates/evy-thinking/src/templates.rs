@@ -96,15 +96,27 @@ You are reasoning out loud."
 /// Embedded canonical Evy persona spec, vendored verbatim from the v3 repo
 /// (`docs/persona/evy.md`, operator-authored, 2026-05-12). Source of truth for
 /// Evy's voice; see ADR 0004 (persona/librarian framing).
+///
+/// The FULL spec (voice + operational orchestration rules, ~7.3k tokens) is
+/// kept vendored for planning / dispatch mode (future wiring). Conversational
+/// chat uses the slim [`EVY_VOICE`] brief instead, so casual turns don't pay
+/// the full persona's prefill cost — see [`conversational_system_prompt`].
+#[allow(dead_code)]
 const EVY_PERSONA: &str = include_str!("persona/evy.md");
+
+/// Slim voice brief (~600 tokens) — Evy's identity + how she speaks, with the
+/// orchestration spec (tool-calling, dispatch, templates) stripped. Used by
+/// [`conversational_system_prompt`]; the chat surface can't dispatch anyway.
+const EVY_VOICE: &str = include_str!("persona/evy-voice.md");
 
 /// System prompt for **conversational** chat — Evy speaking as herself.
 ///
 /// Unlike [`planning_system_prompt`], this does NOT force the 3-phase
-/// topic→plan→conclude flow. It loads Evy's full persona so ordinary
-/// exchanges ("hello") sound like Evy rather than a clinical planning
-/// instrument. When the operator explicitly asks to plan something, the chat
-/// surface switches that session to [`planning_system_prompt`].
+/// topic→plan→conclude flow. It loads Evy's slim voice brief ([`EVY_VOICE`])
+/// so ordinary exchanges ("hello") sound like Evy rather than a clinical
+/// planning instrument — without shipping the full ~7.3k-token persona every
+/// turn. When the operator explicitly asks to plan something, the chat surface
+/// switches that session to [`planning_system_prompt`].
 #[must_use]
 pub fn conversational_system_prompt() -> String {
     format!(
@@ -121,7 +133,7 @@ You are reasoning and conversing from this surface only — you do not have dire
 web, or worker-spawn access here.\n\
 \n\
 --- BEGIN EVY PERSONA (canonical, operator-authored) ---\n\
-{EVY_PERSONA}\n\
+{EVY_VOICE}\n\
 --- END EVY PERSONA ---"
     )
 }
