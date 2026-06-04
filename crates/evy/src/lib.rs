@@ -481,6 +481,14 @@ pub async fn run_daemon_with_shutdown(
     if let Some(skills) = skills_registry.clone() {
         app_state = app_state.with_skills(skills);
     }
+    // P2 — supervisor label for the /api/evy/context meter: "backend/model".
+    if let Some(tp) = config.thinking_partner.as_ref() {
+        let label = match &tp.model {
+            Some(m) => format!("{}/{}", tp.backend, m),
+            None => tp.backend.clone(),
+        };
+        app_state = app_state.with_supervisor_label(label);
+    }
     let app_state = Arc::new(app_state);
     let http_server = HttpServer::new(
         config.comms.http.clone().into(),

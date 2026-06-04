@@ -65,6 +65,9 @@ pub struct DaemonAppState {
     /// `ChatResponse` so the operator can see which skills the model
     /// could see this turn.
     pub skills: Option<Arc<SkillRegistry>>,
+    /// P2 — display label for the active supervisor model, surfaced in the
+    /// `/api/evy/context` meter (e.g. `"lm-studio/gemma-4-26b-a4b-it-mlx"`).
+    pub supervisor_label: Option<String>,
 }
 
 impl DaemonAppState {
@@ -83,6 +86,7 @@ impl DaemonAppState {
             obs_log,
             thinking_partner: None,
             skills: None,
+            supervisor_label: None,
         }
     }
 
@@ -99,6 +103,14 @@ impl DaemonAppState {
     #[must_use]
     pub fn with_skills(mut self, skills: Arc<SkillRegistry>) -> Self {
         self.skills = Some(skills);
+        self
+    }
+
+    /// Attach the supervisor-model display label for the `/api/evy/context`
+    /// meter. Builder-style for the same top-down construction.
+    #[must_use]
+    pub fn with_supervisor_label(mut self, label: String) -> Self {
+        self.supervisor_label = Some(label);
         self
     }
 }
@@ -146,6 +158,10 @@ impl AppState for DaemonAppState {
 
     fn skills(&self) -> Option<Arc<SkillRegistry>> {
         self.skills.clone()
+    }
+
+    fn supervisor_label(&self) -> Option<String> {
+        self.supervisor_label.clone()
     }
 }
 

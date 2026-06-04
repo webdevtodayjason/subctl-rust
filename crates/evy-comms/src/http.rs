@@ -82,6 +82,14 @@ pub trait AppState: Send + Sync + 'static {
     fn skills(&self) -> Option<Arc<SkillRegistry>> {
         None
     }
+
+    /// P2 — display label for the active supervisor model
+    /// (e.g. `"lm-studio/gemma-4-26b-a4b-it-mlx"`), surfaced in the
+    /// `/api/evy/context` meter. Default `None` (renders as `null`); the
+    /// daemon overrides it from `[thinking_partner]` config.
+    fn supervisor_label(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Operator-console-shaped projection of an evy-core `WorkerHandle`.
@@ -365,6 +373,31 @@ fn build_router(
         .route(
             "/api/master/skills",
             get(crate::skills_http::skills_list_handler),
+        )
+        // P2 — transcript + context meter, in the v3 dashboard wire shape.
+        .route(
+            "/api/evy/transcript",
+            get(crate::transcript_http::transcript_handler),
+        )
+        .route(
+            "/api/master/transcript",
+            get(crate::transcript_http::transcript_handler),
+        )
+        .route(
+            "/api/evy/context",
+            get(crate::transcript_http::context_handler),
+        )
+        .route(
+            "/api/master/context",
+            get(crate::transcript_http::context_handler),
+        )
+        .route(
+            "/api/evy/transcript/util",
+            get(crate::transcript_http::transcript_util_handler),
+        )
+        .route(
+            "/api/master/transcript/util",
+            get(crate::transcript_http::transcript_util_handler),
         );
 
     // Phase 4 Slice A: optionally serve the operator-console static

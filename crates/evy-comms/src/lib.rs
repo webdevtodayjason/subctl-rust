@@ -77,6 +77,9 @@ pub mod chat;
 pub mod sessions_http;
 pub mod skills_http;
 
+// ── P2: transcript + context meter (v3-shape) ────────────────────────
+pub mod transcript_http;
+
 // ── Public re-exports — the surface the daemon binary consumes ───────
 
 pub use config::{HttpConfig, DEFAULT_HOST, DEFAULT_PORT};
