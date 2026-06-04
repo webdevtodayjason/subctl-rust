@@ -198,3 +198,55 @@ pub(crate) async fn transcript_util_handler(
         "decision": decide(current_tokens),
     }))
 }
+
+/// Messages kept after a compaction (the recent tail). Mirrors the v3
+/// master's `keep_recent` default.
+const DEFAULT_KEEP_RECENT: usize = 6;
+
+/// `POST /api/evy/transcript/compact?session_id&keep_recent` — P3.
+/// Drops the oldest messages (archiving them to disk), keeps the recent tail,
+/// and persists. Returns `{ok,archived_count,kept_msgs,noop}`.
+pub(crate) async fn compact_handler(
+    State(state): State<HttpState>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Json<Value> {
+    let keep_recent = q
+        .get("keep_recent")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_KEEP_RECENT);
+    let Some(partner) = state.app.thinking_partner() else {
+        return Json(json!({ "ok": false, "error": "thinking-partner not configured" }));
+    };
+    let Some(session) = resolve_session(&state, &q).await else {
+        return Json(json!({ "ok": true, "archived_count": 0, "kept_msgs": 0, "noop": true }));
+    };
+    match partner.compact_session(session.id, keep_recent).await {
+        Some((archived, kept)) => Json(json!({
+            "ok": true,
+            "archived_count": archived,
+            "kept_msgs": kept,
+            "noop": archived == 0,
+        })),
+        None => Json(json!({ "ok": true, "archived_count": 0, "kept_msgs": 0, "noop": true })),
+    }
+}
+
+/// `POST /api/evy/transcript/clear?session_id` — P3 ("New Chat").
+/// Archives the whole session to disk, drops it, and persists. Returns
+/// `{ok,archive:<path|null>}`.
+pub(crate) async fn clear_handler(
+    State(state): State<HttpState>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Json<Value> {
+    let Some(partner) = state.app.thinking_partner() else {
+        return Json(json!({ "ok": false, "error": "thinking-partner not configured" }));
+    };
+    let Some(session) = resolve_session(&state, &q).await else {
+        return Json(json!({ "ok": true, "archive": Value::Null }));
+    };
+    let archive = partner.clear_session(session.id).await;
+    Json(json!({
+        "ok": true,
+        "archive": archive.map(|p| p.display().to_string()),
+    }))
+}

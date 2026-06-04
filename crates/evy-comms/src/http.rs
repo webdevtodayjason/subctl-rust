@@ -398,6 +398,23 @@ fn build_router(
         .route(
             "/api/master/transcript/util",
             get(crate::transcript_http::transcript_util_handler),
+        )
+        // P3 — compaction + clear write paths (archive to disk + persist).
+        .route(
+            "/api/evy/transcript/compact",
+            post(crate::transcript_http::compact_handler),
+        )
+        .route(
+            "/api/master/transcript/compact",
+            post(crate::transcript_http::compact_handler),
+        )
+        .route(
+            "/api/evy/transcript/clear",
+            post(crate::transcript_http::clear_handler),
+        )
+        .route(
+            "/api/master/transcript/clear",
+            post(crate::transcript_http::clear_handler),
         );
 
     // Phase 4 Slice A: optionally serve the operator-console static

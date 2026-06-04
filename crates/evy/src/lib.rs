@@ -468,8 +468,11 @@ pub async fn run_daemon_with_shutdown(
     // is intended for smoke tests that need a partner without
     // touching the live API.
     let thinking_partner = build_thinking_partner(&config, skills_registry.clone()).await?;
-    if thinking_partner.is_some() {
-        tracing::info!("thinking-partner constructed; chat endpoint is live");
+    if let Some(partner) = thinking_partner.as_ref() {
+        // P3 — rehydrate persisted sessions before serving so a restart
+        // doesn't silently lose the operator's open conversation.
+        let restored = partner.restore().await;
+        tracing::info!(restored, "thinking-partner constructed; chat endpoint is live");
     } else {
         tracing::info!("no [thinking_partner] in config; chat endpoint will return 503");
     }
@@ -770,7 +773,15 @@ async fn build_thinking_partner(
             "thinking-partner: unknown backend {other:?} (expected \"anthropic\", \"lm-studio\", \"codex\", or \"stub\")"
         ),
     };
-    let partner = ThinkingPartner::new(backend);
+    // P3 — persist sessions next to the other v4 state dbs so chats survive
+    // a daemon restart (Goal 3). Snapshot lives at <state_dir>/evy-sessions.json.
+    let store_path = config
+        .memory
+        .observation_db
+        .parent()
+        .map(|d| d.join("evy-sessions.json"))
+        .unwrap_or_else(|| std::path::PathBuf::from("evy-sessions.json"));
+    let partner = ThinkingPartner::new(backend).with_store_path(store_path);
     Ok(Some(Arc::new(partner)))
 }
 

@@ -50,6 +50,11 @@ pub struct ThinkingPartner {
     backend: Arc<dyn LlmBackend>,
     sessions: Arc<Mutex<HashMap<SessionId, Session>>>,
     on_message: Option<MessageHook>,
+    /// P3 — optional on-disk snapshot of all sessions. When set, the
+    /// daemon calls [`restore`](Self::restore) at boot and
+    /// [`save_all`](Self::save_all) after each turn so conversations
+    /// survive a restart. `None` keeps the partner purely in-memory.
+    store_path: Option<std::path::PathBuf>,
 }
 
 impl ThinkingPartner {
@@ -63,6 +68,7 @@ impl ThinkingPartner {
             backend,
             sessions: Arc::new(Mutex::new(HashMap::new())),
             on_message: None,
+            store_path: None,
         }
     }
 
@@ -77,6 +83,132 @@ impl ThinkingPartner {
     pub fn with_message_hook(mut self, hook: MessageHook) -> Self {
         self.on_message = Some(hook);
         self
+    }
+
+    /// P3 — point the partner at an on-disk session snapshot. Builder-style
+    /// so daemon construction reads top-down. The file is a JSON array of
+    /// [`Session`]; it is created on the first [`save_all`](Self::save_all).
+    #[must_use]
+    pub fn with_store_path(mut self, path: std::path::PathBuf) -> Self {
+        self.store_path = Some(path);
+        self
+    }
+
+    /// P3 — load persisted sessions into the in-memory map. Best-effort:
+    /// a missing/corrupt file logs and returns 0 rather than failing boot.
+    /// Returns the number of sessions restored. Call once at daemon boot,
+    /// before serving requests.
+    pub async fn restore(&self) -> usize {
+        let Some(path) = self.store_path.as_ref() else {
+            return 0;
+        };
+        let bytes = match tokio::fs::read(path).await {
+            Ok(b) => b,
+            Err(_) => return 0, // first run / no snapshot yet
+        };
+        match serde_json::from_slice::<Vec<Session>>(&bytes) {
+            Ok(list) => {
+                let mut guard = self.sessions.lock().await;
+                let n = list.len();
+                for s in list {
+                    guard.insert(s.id, s);
+                }
+                info!(restored = n, "thinking-partner restored sessions from disk");
+                n
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "session snapshot is corrupt; starting empty");
+                0
+            }
+        }
+    }
+
+    /// P3 — atomically persist every in-memory session to disk. Best-effort;
+    /// logs on error so a write failure never breaks a chat turn. Writes a
+    /// temp file then renames so a crash mid-write can't truncate the snapshot.
+    pub async fn save_all(&self) {
+        let Some(path) = self.store_path.as_ref() else {
+            return;
+        };
+        let list: Vec<Session> = self.sessions.lock().await.values().cloned().collect();
+        let bytes = match serde_json::to_vec_pretty(&list) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to serialize sessions; snapshot skipped");
+                return;
+            }
+        };
+        let tmp = path.with_extension("json.tmp");
+        if let Err(e) = tokio::fs::write(&tmp, &bytes).await {
+            tracing::warn!(error = %e, "failed to write session snapshot tmp; skipped");
+            return;
+        }
+        if let Err(e) = tokio::fs::rename(&tmp, path).await {
+            tracing::warn!(error = %e, "failed to rename session snapshot into place");
+        }
+    }
+
+    /// Directory for compaction/clear archives, beside the snapshot file.
+    fn archive_dir(&self) -> Option<std::path::PathBuf> {
+        self.store_path
+            .as_ref()?
+            .parent()
+            .map(|d| d.join("evy-archives"))
+    }
+
+    /// Write messages to a timestamped JSONL archive; returns its path.
+    async fn write_archive(&self, label: &str, msgs: &[Message]) -> Option<std::path::PathBuf> {
+        let dir = self.archive_dir()?;
+        tokio::fs::create_dir_all(&dir).await.ok()?;
+        let path = dir.join(format!("{label}-{}.jsonl", chrono::Utc::now().timestamp_millis()));
+        let mut buf = String::new();
+        for m in msgs {
+            if let Ok(line) = serde_json::to_string(m) {
+                buf.push_str(&line);
+                buf.push('\n');
+            }
+        }
+        tokio::fs::write(&path, buf).await.ok()?;
+        Some(path)
+    }
+
+    /// P3 — drop the oldest messages from a session, keeping the most recent
+    /// `keep_recent`. Archives the removed messages to disk and persists the
+    /// trimmed session. Returns `(archived_count, kept)`, or `None` if the
+    /// session is unknown.
+    pub async fn compact_session(
+        &self,
+        id: SessionId,
+        keep_recent: usize,
+    ) -> Option<(usize, usize)> {
+        let removed: Vec<Message> = {
+            let mut guard = self.sessions.lock().await;
+            let session = guard.get_mut(&id)?;
+            if session.messages.len() <= keep_recent {
+                return Some((0, session.messages.len()));
+            }
+            let archived = session.messages.len() - keep_recent;
+            session.messages.drain(0..archived).collect()
+        };
+        let kept = self
+            .sessions
+            .lock()
+            .await
+            .get(&id)
+            .map_or(0, |s| s.messages.len());
+        let _ = self.write_archive("compact", &removed).await;
+        self.save_all().await;
+        Some((removed.len(), kept))
+    }
+
+    /// P3 — archive a whole session to disk, remove it, and persist the
+    /// updated set ("New Chat" / clear). Returns the archive path, or `None`
+    /// if the session was unknown.
+    pub async fn clear_session(&self, id: SessionId) -> Option<std::path::PathBuf> {
+        let session = self.sessions.lock().await.remove(&id)?;
+        let path = self.write_archive("clear", &session.messages).await;
+        self.save_all().await;
+        path
     }
 
     /// Start a new planning session.

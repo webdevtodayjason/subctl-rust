@@ -392,6 +392,9 @@ async fn chat_handler_blocking(
         }
     };
 
+    // P3 — persist sessions so the conversation survives a daemon restart.
+    partner.save_all().await;
+
     Ok(Json(ChatResponse {
         session_id,
         response: response_text,
@@ -578,6 +581,9 @@ async fn stream_worker(
 
     match outcome {
         Ok(sid) => {
+            // P3 — persist before signalling done so a restart right after
+            // a turn still has the just-completed exchange.
+            partner.save_all().await;
             let _ = tx.send(ChatStreamEvent::Done { session_id: sid }).await;
         }
         Err(err) => emit_error(&tx, err).await,
