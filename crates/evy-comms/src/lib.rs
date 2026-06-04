@@ -80,6 +80,9 @@ pub mod skills_http;
 // ── P2: transcript + context meter (v3-shape) ────────────────────────
 pub mod transcript_http;
 
+// ── Cutover Phase 0: reverse-proxy fallback to v3 Bun + native /api/host ──
+pub mod proxy_http;
+
 // ── Public re-exports — the surface the daemon binary consumes ───────
 
 pub use config::{HttpConfig, DEFAULT_HOST, DEFAULT_PORT};

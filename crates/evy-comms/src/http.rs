@@ -22,7 +22,7 @@ use axum::{
     extract::State,
     http::{HeaderValue, StatusCode},
     response::{IntoResponse, Json, Response},
-    routing::{delete, get, post},
+    routing::{any, delete, get, post},
     Router,
 };
 use evy_core::{MandateId, ProviderKind, WorkerId, WorkerStatus};
@@ -336,18 +336,13 @@ fn build_router(
         .route("/health", get(health_handler))
         .route("/api/version", get(version_handler))
         .route("/api/evy/events", get(events_handler))
-        .route("/api/master/events", get(events_handler))
         .route("/api/evy/workers", get(workers_handler))
-        .route("/api/master/workers", get(workers_handler))
         .route("/api/evy/scheduler/jobs", get(jobs_handler))
-        .route("/api/master/scheduler/jobs", get(jobs_handler))
         .route("/api/evy/policy", get(policy_handler))
-        .route("/api/master/policy", get(policy_handler))
         // Phase 6 chat surface — POST only; aliased under /api/master
         // for parity with v3 dashboards even though there's no v3
         // equivalent (legacy operators may script either prefix).
         .route("/api/evy/chat", post(crate::chat::chat_handler))
-        .route("/api/master/chat", post(crate::chat::chat_handler))
         // Phase 6 follow-up — TUI-driving endpoints. Aliased under
         // /api/master for parity with the other operator routes.
         .route(
@@ -355,23 +350,11 @@ fn build_router(
             get(crate::sessions_http::sessions_list_handler),
         )
         .route(
-            "/api/master/sessions",
-            get(crate::sessions_http::sessions_list_handler),
-        )
-        .route(
             "/api/evy/sessions/{id}",
             delete(crate::sessions_http::sessions_delete_handler),
         )
         .route(
-            "/api/master/sessions/{id}",
-            delete(crate::sessions_http::sessions_delete_handler),
-        )
-        .route(
             "/api/evy/skills",
-            get(crate::skills_http::skills_list_handler),
-        )
-        .route(
-            "/api/master/skills",
             get(crate::skills_http::skills_list_handler),
         )
         // P2 — transcript + context meter, in the v3 dashboard wire shape.
@@ -380,32 +363,16 @@ fn build_router(
             get(crate::transcript_http::transcript_handler),
         )
         .route(
-            "/api/master/transcript",
-            get(crate::transcript_http::transcript_handler),
-        )
-        .route(
             "/api/evy/context",
-            get(crate::transcript_http::context_handler),
-        )
-        .route(
-            "/api/master/context",
             get(crate::transcript_http::context_handler),
         )
         .route(
             "/api/evy/transcript/util",
             get(crate::transcript_http::transcript_util_handler),
         )
-        .route(
-            "/api/master/transcript/util",
-            get(crate::transcript_http::transcript_util_handler),
-        )
         // P3 — compaction + clear write paths (archive to disk + persist).
         .route(
             "/api/evy/transcript/compact",
-            post(crate::transcript_http::compact_handler),
-        )
-        .route(
-            "/api/master/transcript/compact",
             post(crate::transcript_http::compact_handler),
         )
         .route(
@@ -416,6 +383,13 @@ fn build_router(
             "/api/master/transcript/clear",
             post(crate::transcript_http::clear_handler),
         );
+
+    // Phase 0 (cutover) — native /api/host, then a reverse-proxy fallback:
+    // any /api/* not served natively above goes to the v3 Bun dashboard
+    // (Fork A bridge + master proxy). Specific routes above always win.
+    router = router
+        .route("/api/host", get(crate::proxy_http::host_handler))
+        .route("/api/{*rest}", any(crate::proxy_http::reverse_proxy_handler));
 
     // Phase 4 Slice A: optionally serve the operator-console static
     // bundle as a fallback. ServeDir resolves `index.html` automatically

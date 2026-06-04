@@ -212,6 +212,10 @@ pub struct HttpSectionConfig {
     /// CORS allowlist. Default empty (CORS disabled).
     #[serde(default)]
     pub allow_origins: Vec<String>,
+    /// Cutover Phase 0: directory whose contents v4 serves as the dashboard
+    /// UI (via `ServeDir` fallback). `None` = API-only. Absolute path.
+    #[serde(default)]
+    pub static_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for HttpSectionConfig {
@@ -220,21 +224,20 @@ impl Default for HttpSectionConfig {
             host: evy_comms::DEFAULT_HOST.to_owned(),
             port: evy_comms::DEFAULT_PORT,
             allow_origins: Vec::new(),
+            static_dir: None,
         }
     }
 }
 
 impl From<HttpSectionConfig> for evy_comms::HttpConfig {
     fn from(s: HttpSectionConfig) -> Self {
-        // Phase 4 Slice A: `static_dir` is a runtime/install-layout
-        // decision the daemon binary makes — TOML doesn't carry it, so
-        // we always pass `None` here and let the binary set the dir via
-        // `HttpConfig::with_static_dir(...)` after this conversion.
         Self {
             host: s.host,
             port: s.port,
             allow_origins: s.allow_origins,
-            static_dir: None,
+            // Cutover Phase 0: the dashboard bundle dir, if the operator set
+            // `[comms.http] static_dir` in config.toml.
+            static_dir: s.static_dir,
         }
     }
 }
