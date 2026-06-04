@@ -83,6 +83,9 @@ pub mod transcript_http;
 // ── Cutover Phase 0: reverse-proxy fallback to v3 Bun + native /api/host ──
 pub mod proxy_http;
 
+// ── Cutover Phase 1: dashboard state synthesis (verdict, rate-limits, /api/state) ──
+pub mod dashboard_state;
+
 // ── Public re-exports — the surface the daemon binary consumes ───────
 
 pub use config::{HttpConfig, DEFAULT_HOST, DEFAULT_PORT};
