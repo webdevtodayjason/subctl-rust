@@ -17,11 +17,14 @@ use std::sync::OnceLock;
 
 use axum::{
     body::Body,
-    extract::Request,
+    extract::ws::{Message as AxMsg, WebSocket, WebSocketUpgrade},
+    extract::{RawQuery, Request},
     http::{HeaderMap, HeaderName, StatusCode},
     response::{IntoResponse, Json, Response},
 };
+use futures::{SinkExt, StreamExt};
 use serde_json::json;
+use tokio_tungstenite::tungstenite::protocol::Message as TgMsg;
 
 /// Hop-by-hop headers (RFC 7230 §6.1) + host — never forwarded across a proxy hop.
 const HOP_BY_HOP: &[&str] = &[
@@ -133,4 +136,68 @@ fn dirs_config_dir() -> std::path::PathBuf {
     std::env::var("HOME")
         .map(|h| std::path::PathBuf::from(h).join(".config/subctl"))
         .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
+}
+
+/// `GET /api/live` (WebSocket) — Phase 0 web-terminal passthrough. `reqwest`
+/// can't proxy a WS upgrade, so this is handled separately from the HTTP
+/// reverse-proxy: accept the browser's upgrade, dial the v3 Bun dashboard's
+/// `/api/live` WS (preserving the `?team&cols&rows` query), and splice frames
+/// both ways until either side closes.
+pub(crate) async fn ws_proxy_handler(ws: WebSocketUpgrade, RawQuery(q): RawQuery) -> Response {
+    let query = q.map(|s| format!("?{s}")).unwrap_or_default();
+    ws.on_upgrade(move |sock| bridge_ws(sock, query))
+}
+
+async fn bridge_ws(client: WebSocket, query: String) {
+    let url = format!("ws://{}/api/live{}", upstream_base(), query);
+    let upstream = match tokio_tungstenite::connect_async(&url).await {
+        Ok((stream, _resp)) => stream,
+        Err(e) => {
+            tracing::warn!(error = %e, url = %url, "ws /api/live upstream connect failed");
+            return;
+        }
+    };
+    let (mut client_tx, mut client_rx) = client.split();
+    let (mut up_tx, mut up_rx) = upstream.split();
+
+    // browser → Bun
+    let c2u = async {
+        while let Some(Ok(msg)) = client_rx.next().await {
+            let tg = match msg {
+                AxMsg::Text(t) => TgMsg::Text(t.to_string()),
+                AxMsg::Binary(b) => TgMsg::Binary(b.to_vec()),
+                AxMsg::Ping(b) => TgMsg::Ping(b.to_vec()),
+                AxMsg::Pong(b) => TgMsg::Pong(b.to_vec()),
+                AxMsg::Close(_) => break,
+            };
+            if up_tx.send(tg).await.is_err() {
+                break;
+            }
+        }
+        let _ = up_tx.close().await;
+    };
+
+    // Bun → browser
+    let u2c = async {
+        while let Some(Ok(msg)) = up_rx.next().await {
+            let ax = match msg {
+                TgMsg::Text(t) => AxMsg::Text(t.into()),
+                TgMsg::Binary(b) => AxMsg::Binary(b.into()),
+                TgMsg::Ping(b) => AxMsg::Ping(b.into()),
+                TgMsg::Pong(b) => AxMsg::Pong(b.into()),
+                TgMsg::Close(_) => break,
+                TgMsg::Frame(_) => continue, // low-level; never yielded by a read stream
+            };
+            if client_tx.send(ax).await.is_err() {
+                break;
+            }
+        }
+        let _ = client_tx.close().await;
+    };
+
+    // Whichever side closes first tears down the other.
+    tokio::select! {
+        _ = c2u => {}
+        _ = u2c => {}
+    }
 }

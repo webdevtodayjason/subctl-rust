@@ -27,11 +27,14 @@ tokio = { workspace = true }
 tokio-util = { version = "0.7", features = ["rt"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 
-# HTTP layer (axum 0.8 / tower 0.5 / tower-http 0.6).
-axum = { workspace = true }
+# HTTP layer (axum 0.8 / tower 0.5 / tower-http 0.6). `ws` for the /api/live
+# WebSocket reverse-proxy (Phase 0 web-terminal passthrough).
+axum = { workspace = true, features = ["ws"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
 http = "1"
+# WS client for the /api/live reverse-proxy (dials the v3 Bun dashboard's WS).
+tokio-tungstenite = "0.21"
 
 # Serialization + time + ids.
 serde = { workspace = true }

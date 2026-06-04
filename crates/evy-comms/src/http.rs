@@ -389,6 +389,10 @@ fn build_router(
     // (Fork A bridge + master proxy). Specific routes above always win.
     router = router
         .route("/api/host", get(crate::proxy_http::host_handler))
+        // /api/live (web terminal WS) — WS upgrade can't go through the HTTP
+        // reverse-proxy, so it's bridged separately. Specific route wins over
+        // the catch-all below.
+        .route("/api/live", get(crate::proxy_http::ws_proxy_handler))
         .route("/api/{*rest}", any(crate::proxy_http::reverse_proxy_handler));
 
     // Phase 4 Slice A: optionally serve the operator-console static
