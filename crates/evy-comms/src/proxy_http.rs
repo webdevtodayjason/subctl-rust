@@ -144,8 +144,32 @@ fn dirs_config_dir() -> std::path::PathBuf {
 /// `/api/live` WS (preserving the `?team&cols&rows` query), and splice frames
 /// both ways until either side closes.
 pub(crate) async fn ws_proxy_handler(ws: WebSocketUpgrade, RawQuery(q): RawQuery) -> Response {
-    let query = q.map(|s| format!("?{s}")).unwrap_or_default();
-    ws.on_upgrade(move |sock| bridge_ws(sock, query))
+    let raw = q.unwrap_or_default();
+    // The web terminal attaches with `?team=...`; the liveness socket has none.
+    // Terminal → proxy to Bun's /api/live WS (not yet native). Liveness → native
+    // broadcast of /api/state every 2s (Phase 1 slice 1f).
+    if raw.contains("team=") {
+        ws.on_upgrade(move |sock| bridge_ws(sock, format!("?{raw}")))
+    } else {
+        ws.on_upgrade(liveness_broadcast)
+    }
+}
+
+/// Native `/api/live` liveness (1f): push the native `/api/state` snapshot every
+/// 2s. app.js parses each message as `/api/state` and runs `flashPulse` + `render`
+/// — pulse-on-signature-change is client-side, so the server just streams snapshots.
+async fn liveness_broadcast(mut socket: WebSocket) {
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(2));
+    loop {
+        ticker.tick().await;
+        let state = crate::accounts_http::build_state().await;
+        let Ok(msg) = serde_json::to_string(&state) else {
+            continue;
+        };
+        if socket.send(AxMsg::Text(msg.into())).await.is_err() {
+            break; // client disconnected
+        }
+    }
 }
 
 async fn bridge_ws(client: WebSocket, query: String) {

@@ -184,11 +184,12 @@ async fn fetch_bun_state() -> Option<serde_json::Value> {
     resp.json::<serde_json::Value>().await.ok()
 }
 
-/// `GET /api/state` — native composite (slice 1e). Overlays v4-native `accounts`
-/// + `dispatch` (severity best-of) onto the Bun base, so the verdict pill and
-/// accounts table are native while sessions/orch/cost keep rendering from v3
-/// until their phases. Falls back to a minimal native object if Bun is down.
-pub(crate) async fn state_handler() -> Json<serde_json::Value> {
+/// Build the native `/api/state` composite (slice 1e). Overlays v4-native
+/// `accounts` + `dispatch` (severity best-of) onto the Bun base, so the verdict
+/// pill and accounts table are native while sessions/orch/cost keep rendering
+/// from v3 until their phases. Falls back to a minimal native object if Bun is
+/// down. Shared by the HTTP handler and the `/api/live` liveness broadcast (1f).
+pub(crate) async fn build_state() -> serde_json::Value {
     let now_ms = chrono::Utc::now().timestamp_millis();
     let accounts = build_account_summaries(now_ms).await;
     let av: Vec<(String, AccountVerdict)> = accounts.iter().map(AccountSummary::alias_and_verdict).collect();
@@ -202,7 +203,12 @@ pub(crate) async fn state_handler() -> Json<serde_json::Value> {
         obj.insert("accounts".into(), serde_json::to_value(&accounts).unwrap_or(serde_json::Value::Null));
         obj.insert("dispatch".into(), serde_json::to_value(&dispatch).unwrap_or(serde_json::Value::Null));
     }
-    Json(base)
+    base
+}
+
+/// `GET /api/state` — native composite handler.
+pub(crate) async fn state_handler() -> Json<serde_json::Value> {
+    Json(build_state().await)
 }
 
 /// `POST /api/refresh` — bust the usage cache (force-refresh) + ack. The next
