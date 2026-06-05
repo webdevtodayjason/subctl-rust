@@ -111,9 +111,65 @@ pub fn compute_account_verdict(a: &AccountVerdictInput) -> AccountVerdict {
     AccountVerdict { verdict: level, reasons }
 }
 
+// ─── slice 1b: per-account auth status (ported from v3 authStatus) ────────────
+
+/// Per-account auth readiness. Serializes to v3's `"ready" | "not_authenticated"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthStatus {
+    Ready,
+    NotAuthenticated,
+}
+
+/// Port of v3 `authStatus(account)` (server.ts:1421-1447). Provider-agnostic
+/// disk-marker check, in order: `<config_dir>/.credentials.json` present → ready;
+/// or `<config_dir>/projects/` has ≥1 subdirectory → ready; or codex
+/// `<config_dir>/auth.json` with a non-empty `tokens.id_token` or
+/// `tokens.access_token` → ready; else not_authenticated.
+#[must_use]
+pub fn auth_status(config_dir: &std::path::Path) -> AuthStatus {
+    if config_dir.join(".credentials.json").exists() {
+        return AuthStatus::Ready;
+    }
+    if let Ok(entries) = std::fs::read_dir(config_dir.join("projects")) {
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                return AuthStatus::Ready;
+            }
+        }
+    }
+    if let Ok(text) = std::fs::read_to_string(config_dir.join("auth.json")) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+            let tokens = v.get("tokens");
+            let non_empty = |k: &str| {
+                tokens
+                    .and_then(|t| t.get(k))
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|s| !s.is_empty())
+            };
+            if non_empty("id_token") || non_empty("access_token") {
+                return AuthStatus::Ready;
+            }
+        }
+    }
+    AuthStatus::NotAuthenticated
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn tmpdir() -> std::path::PathBuf {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let p = std::env::temp_dir().join(format!(
+            "evy-auth-test-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
 
     fn input() -> AccountVerdictInput {
         AccountVerdictInput {
@@ -189,5 +245,47 @@ mod tests {
     fn js_num_formats_like_template_literal() {
         assert_eq!(js_num(72.0), "72");
         assert_eq!(js_num(72.5), "72.5");
+    }
+
+    #[test]
+    fn auth_ready_via_credentials_json() {
+        let d = tmpdir();
+        std::fs::write(d.join(".credentials.json"), "{}").unwrap();
+        assert_eq!(auth_status(&d), AuthStatus::Ready);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn auth_ready_via_projects_subdir() {
+        let d = tmpdir();
+        std::fs::create_dir_all(d.join("projects").join("some-session")).unwrap();
+        assert_eq!(auth_status(&d), AuthStatus::Ready);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn auth_ready_via_codex_access_token() {
+        let d = tmpdir();
+        std::fs::write(d.join("auth.json"), r#"{"tokens":{"access_token":"abc"}}"#).unwrap();
+        assert_eq!(auth_status(&d), AuthStatus::Ready);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn auth_not_authenticated_when_empty() {
+        let d = tmpdir();
+        assert_eq!(auth_status(&d), AuthStatus::NotAuthenticated);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn auth_not_authenticated_codex_empty_tokens() {
+        let d = tmpdir();
+        std::fs::write(d.join("auth.json"), r#"{"tokens":{}}"#).unwrap();
+        assert_eq!(auth_status(&d), AuthStatus::NotAuthenticated);
+        // empty projects dir (no subdirs) must not flip to ready
+        std::fs::create_dir_all(d.join("projects")).unwrap();
+        assert_eq!(auth_status(&d), AuthStatus::NotAuthenticated);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
