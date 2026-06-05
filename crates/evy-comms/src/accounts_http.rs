@@ -11,8 +11,11 @@ use std::path::PathBuf;
 use axum::response::Json;
 use serde::Serialize;
 
+use std::time::Duration;
+
 use crate::dashboard_state::{
-    auth_status, compute_account_verdict, AccountVerdict, AccountVerdictInput, AuthStatus, Verdict,
+    auth_status, compute_account_verdict, dispatch_verdict, AccountVerdict, AccountVerdictInput,
+    AuthStatus, Verdict,
 };
 use crate::rate_limits::{build_rate_limits, read_usage_history_24h, today_date_str, UsageBucket};
 use crate::usage_cache::{instance as usage_cache, UsageEntry};
@@ -165,4 +168,47 @@ pub(crate) async fn rate_limits_handler() -> Json<serde_json::Value> {
         "today_total": rl.today_total,
         "recent_429_count": rl.recent_429_count,
     }))
+}
+
+/// Fetch the v3 Bun `/api/state` as the composite base (sessions/orchestrations/
+/// service/cost/conversations — not yet v4-native, per Phase 1 non-goals).
+async fn fetch_bun_state() -> Option<serde_json::Value> {
+    let upstream =
+        std::env::var("EVY_PROXY_UPSTREAM").unwrap_or_else(|_| "127.0.0.1:8787".to_string());
+    let resp = reqwest::Client::new()
+        .get(format!("http://{upstream}/api/state"))
+        .timeout(Duration::from_secs(8))
+        .send()
+        .await
+        .ok()?;
+    resp.json::<serde_json::Value>().await.ok()
+}
+
+/// `GET /api/state` — native composite (slice 1e). Overlays v4-native `accounts`
+/// + `dispatch` (severity best-of) onto the Bun base, so the verdict pill and
+/// accounts table are native while sessions/orch/cost keep rendering from v3
+/// until their phases. Falls back to a minimal native object if Bun is down.
+pub(crate) async fn state_handler() -> Json<serde_json::Value> {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let accounts = build_account_summaries(now_ms).await;
+    let av: Vec<(String, AccountVerdict)> = accounts.iter().map(AccountSummary::alias_and_verdict).collect();
+    let dispatch = dispatch_verdict(&av);
+
+    let mut base = fetch_bun_state()
+        .await
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({ "ok": true }));
+    if let Some(obj) = base.as_object_mut() {
+        obj.insert("accounts".into(), serde_json::to_value(&accounts).unwrap_or(serde_json::Value::Null));
+        obj.insert("dispatch".into(), serde_json::to_value(&dispatch).unwrap_or(serde_json::Value::Null));
+    }
+    Json(base)
+}
+
+/// `POST /api/refresh` — bust the usage cache (force-refresh) + ack. The next
+/// `/api/state`/`/api/evy/accounts` call sees fresh usage.
+pub(crate) async fn refresh_handler() -> Json<serde_json::Value> {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    usage_cache().fetch_all(now_ms.max(0) as u64, true).await;
+    Json(serde_json::json!({ "ok": true }))
 }
