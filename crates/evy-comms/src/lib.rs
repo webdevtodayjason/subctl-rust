@@ -87,6 +87,8 @@ pub mod proxy_http;
 pub mod dashboard_state;
 // ── Cutover Phase 1 slice 1c: 3-layer usage cache (shells `subctl usage --json`) ──
 pub mod usage_cache;
+// ── Cutover Phase 1 slice 1d: rate-limit + usage-history 24h buckets ──
+pub mod rate_limits;
 
 // ── Public re-exports — the surface the daemon binary consumes ───────
 
