@@ -135,3 +135,34 @@ pub(crate) async fn accounts_handler() -> Json<serde_json::Value> {
     let accounts = build_account_summaries(now_ms).await;
     Json(serde_json::json!({ "accounts": accounts }))
 }
+
+/// `GET /api/evy/rate-limits` → `{ by_account:[{account,usage_history_24h[24],
+/// buckets_24h[24],count_today}], today_total, recent_429_count }` (slice 1d/1e).
+pub(crate) async fn rate_limits_handler() -> Json<serde_json::Value> {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let rows = evy_providers::AccountsStore::open(&accounts_conf_path())
+        .and_then(|s| s.list_rows())
+        .unwrap_or_default();
+    let aliases: Vec<String> = rows.iter().map(|r| r.alias.clone()).collect();
+    let history = read_usage_history_24h(&history_path(), now_ms);
+    let rl = build_rate_limits(&rl_log_path(), &aliases, now_ms, &today_date_str());
+
+    let by_account: Vec<serde_json::Value> = aliases
+        .iter()
+        .map(|a| {
+            let acct = rl.by_account.get(a);
+            serde_json::json!({
+                "account": a,
+                "usage_history_24h": history.get(a).cloned().unwrap_or_else(|| vec![UsageBucket::default(); 24]),
+                "buckets_24h": acct.map(|x| x.buckets_24h.clone()).unwrap_or_else(|| vec![0; 24]),
+                "count_today": acct.map_or(0, |x| x.count_today),
+            })
+        })
+        .collect();
+
+    Json(serde_json::json!({
+        "by_account": by_account,
+        "today_total": rl.today_total,
+        "recent_429_count": rl.recent_429_count,
+    }))
+}

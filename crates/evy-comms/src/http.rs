@@ -391,6 +391,8 @@ fn build_router(
         .route("/api/host", get(crate::proxy_http::host_handler))
         // Phase 1 — native /api/evy/accounts (accounts + auth + usage + verdict).
         .route("/api/evy/accounts", get(crate::accounts_http::accounts_handler))
+        // Phase 1 — native /api/evy/rate-limits (24h buckets + today_total + 429s).
+        .route("/api/evy/rate-limits", get(crate::accounts_http::rate_limits_handler))
         // /api/live (web terminal WS) — WS upgrade can't go through the HTTP
         // reverse-proxy, so it's bridged separately. Specific route wins over
         // the catch-all below.
