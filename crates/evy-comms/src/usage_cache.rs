@@ -30,8 +30,10 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(12);
 /// One usage window (`five_hour` / `seven_day` / …). `{utilization, resets_at}`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UsageWindow {
+    /// Utilization percentage (0–100), if reported.
     #[serde(default)]
     pub utilization: Option<f64>,
+    /// ISO-8601 reset timestamp, if reported.
     #[serde(default)]
     pub resets_at: Option<String>,
 }
@@ -39,14 +41,19 @@ pub struct UsageWindow {
 /// Per-account usage payload, mirroring v3 `UsageEntry`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UsageEntry {
+    /// 5-hour rolling session window.
     #[serde(default)]
     pub five_hour: Option<UsageWindow>,
+    /// 7-day rolling weekly window.
     #[serde(default)]
     pub seven_day: Option<UsageWindow>,
+    /// 7-day window for Sonnet specifically.
     #[serde(default)]
     pub seven_day_sonnet: Option<UsageWindow>,
+    /// 7-day window for Opus specifically.
     #[serde(default)]
     pub seven_day_opus: Option<UsageWindow>,
+    /// Extra-usage / overage block (passed through opaquely).
     #[serde(default)]
     pub extra_usage: Option<serde_json::Value>,
 }
@@ -55,16 +62,23 @@ pub struct UsageEntry {
 /// emitted by `subctl usage --json`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountUsageResult {
+    /// Account alias (e.g. `claude-jason`).
     pub alias: String,
+    /// The account's config dir.
     #[serde(default)]
     pub cfg_dir: String,
+    /// Whether this fetch succeeded.
     pub ok: bool,
+    /// The usage payload when `ok` (or the cached last-good when stale).
     #[serde(default)]
     pub usage: Option<UsageEntry>,
+    /// Error string when the fetch failed (e.g. an HTTP 429).
     #[serde(default)]
     pub error: Option<String>,
+    /// True when `usage` is a substituted last-good value, not fresh.
     #[serde(default)]
     pub stale: Option<bool>,
+    /// Age (ms) of the substituted last-good value when `stale`.
     #[serde(default)]
     pub stale_age_ms: Option<u64>,
 }
@@ -172,6 +186,9 @@ fn tick_stale_age(data: &[AccountUsageResult], elapsed_ms: u64) -> Vec<AccountUs
 }
 
 impl UsageCache {
+    /// Build a fresh cache. The `subctl` binary path comes from `EVY_SUBCTL_BIN`
+    /// (default `/Users/sem/code/subctl/bin/subctl`, the v3 CLI that serves
+    /// `usage --json`).
     #[must_use]
     pub fn new() -> Self {
         let subctl_bin = std::env::var("EVY_SUBCTL_BIN")
@@ -303,7 +320,7 @@ mod tests {
         // next: a fails (429) → substitute last-good, tagged stale, real numbers
         let out2 = apply_fallback(&mut lg, vec![entry("a", false, None, Some("429"))], 4000);
         assert_eq!(out2.len(), 1);
-        assert_eq!(out2[0].ok, false);
+        assert!(!out2[0].ok);
         assert_eq!(out2[0].stale, Some(true));
         assert_eq!(out2[0].stale_age_ms, Some(3000));
         assert_eq!(out2[0].usage.as_ref().unwrap().seven_day.as_ref().unwrap().utilization, Some(42.0));

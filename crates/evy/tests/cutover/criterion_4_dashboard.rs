@@ -163,26 +163,12 @@ async fn all_seven_operator_routes_respond_2xx_with_populated_state() {
         .expect("policy JSON");
     assert!(policy.is_object(), "policy must serialize as JSON object");
 
-    // /api/master/workers — legacy alias, identical to /api/evy/workers
-    let alias: Vec<WorkerSummary> = reqwest::get(format!("{base}/api/master/workers"))
-        .await
-        .expect("GET master/workers")
-        .json()
-        .await
-        .expect("alias JSON");
-    assert_eq!(
-        alias, expected_workers,
-        "/api/master/* alias must equal /api/evy/*"
-    );
-
-    // /api/master/scheduler/jobs — legacy alias
-    let alias_jobs: Vec<JobSummary> = reqwest::get(format!("{base}/api/master/scheduler/jobs"))
-        .await
-        .expect("GET master/jobs")
-        .json()
-        .await
-        .expect("alias jobs JSON");
-    assert_eq!(alias_jobs, expected_jobs);
+    // NOTE: the legacy `/api/master/*` aliases were intentionally dropped in the
+    // full-cutover Phase 0 (so `/api/master/events|chat` fall through to the v3
+    // Bun dashboard's Fork A bridge, and `/api/master/transcript|context` keep
+    // Bun's session-id injection). The native `/api/evy/*` routes asserted above
+    // are the operator console's surface; `/api/master/*` now reverse-proxies to
+    // v3 (not asserted here — no Bun upstream in this test harness).
 
     shutdown.cancel();
 }

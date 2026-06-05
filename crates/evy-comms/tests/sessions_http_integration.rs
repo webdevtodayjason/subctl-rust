@@ -252,22 +252,21 @@ async fn sessions_master_alias_routes_also_work() {
     let ids = open_sessions(&base, 1, &["alias-topic"]).await;
     let sid = ids[0];
 
-    // List via alias.
+    // `/api/master/*` aliases were dropped in full-cutover Phase 0 → they fall
+    // through to the reverse-proxy (no Bun upstream here → non-success). Native
+    // `/api/evy/sessions` + delete are covered by the tests above.
     let res = reqwest::Client::new()
         .get(format!("{base}/api/master/sessions"))
         .send()
         .await
         .expect("send list");
-    assert_eq!(res.status(), 200);
-    let body: SessionsListResponse = res.json().await.expect("json");
-    assert_eq!(body.sessions.len(), 1);
+    assert_ne!(res.status(), 200, "/api/master/sessions not native post-cutover");
 
-    // Delete via alias.
     let res = reqwest::Client::new()
         .delete(format!("{base}/api/master/sessions/{sid}"))
         .send()
         .await
         .expect("send delete");
-    assert_eq!(res.status(), 204);
+    assert_ne!(res.status(), 204, "/api/master/sessions/:id not native post-cutover");
     shutdown.cancel();
 }

@@ -24,8 +24,11 @@ const THRESH_5H_RED: f64 = 95.0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Verdict {
+    /// Dispatch is clear — go.
     Green,
+    /// Caution — elevated usage or RL hits; dispatch with care.
     Yellow,
+    /// Do not dispatch — exhausted, unauthenticated, or rate-limited.
     Red,
 }
 
@@ -33,17 +36,24 @@ pub enum Verdict {
 /// `computeAccountVerdict` reads (utilizations are percentages, may be absent).
 #[derive(Debug, Clone)]
 pub struct AccountVerdictInput {
+    /// Whether the account is authenticated (false → immediate red).
     pub auth_ready: bool,
+    /// 7-day weekly utilization percentage, if known.
     pub seven_day_util: Option<f64>,
+    /// 5-hour session utilization percentage, if known.
     pub five_hour_util: Option<f64>,
+    /// Count of rate-limit (429) hits today for this account.
     pub recent_429: u32,
+    /// Number of parallel sessions currently running on this account.
     pub parallel_on_account: u32,
 }
 
 /// Verdict + the human-readable reasons (shown in the Overview pill tooltip).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountVerdict {
+    /// The computed color.
     pub verdict: Verdict,
+    /// Per-account reason strings (v3-faithful), empty when green.
     pub reasons: Vec<String>,
 }
 
@@ -170,7 +180,9 @@ pub fn dispatch_verdict(accounts: &[(String, AccountVerdict)]) -> AccountVerdict
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthStatus {
+    /// Credentials present on disk — the account can dispatch.
     Ready,
+    /// No usable credentials found.
     NotAuthenticated,
 }
 

@@ -137,7 +137,7 @@ async fn skills_list_returns_loaded_catalog() {
 }
 
 #[tokio::test]
-async fn skills_list_master_alias_route_also_works() {
+async fn skills_list_master_alias_dropped_post_cutover() {
     let (_dir, reg) = fixture_registry();
     let state = Arc::new(SkillsTestState { skills: Some(reg) });
     let (base, shutdown) = spawn(state).await;
@@ -147,8 +147,10 @@ async fn skills_list_master_alias_route_also_works() {
         .send()
         .await
         .expect("send");
-    assert_eq!(res.status(), 200);
-    let body: SkillsListResponse = res.json().await.expect("json");
-    assert_eq!(body.skills.len(), 2);
+    assert_ne!(
+        res.status(),
+        200,
+        "/api/master/skills must not be natively handled post-cutover"
+    );
     shutdown.cancel();
 }

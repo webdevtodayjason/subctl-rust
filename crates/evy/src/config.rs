@@ -712,11 +712,13 @@ claude_mem_db = "/Users/sem/.claude-mem/db.sqlite"
             host: "0.0.0.0".into(),
             port: 7000,
             allow_origins: vec!["http://x".into()],
+            static_dir: Some("/var/lib/evy/web".into()),
         };
         let c: evy_comms::HttpConfig = s.into();
         assert_eq!(c.host, "0.0.0.0");
         assert_eq!(c.port, 7000);
         assert_eq!(c.allow_origins, vec!["http://x".to_owned()]);
+        assert_eq!(c.static_dir, Some("/var/lib/evy/web".into()));
     }
 
     #[test]

@@ -20,10 +20,14 @@ const RL_RECENT_WINDOW_SEC: i64 = 2 * 60 * 60;
 
 // ─── usage-history buckets (utilization over time) ───────────────────────────
 
+/// One hour-bucket of usage history: the max utilization observed that hour.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct UsageBucket {
+    /// Max 5-hour utilization % seen this hour (None if no samples).
     pub five_hour_max: Option<f64>,
+    /// Max 7-day utilization % seen this hour (None if no samples).
     pub seven_day_max: Option<f64>,
+    /// Number of samples recorded this hour.
     pub samples: u32,
 }
 
@@ -80,8 +84,10 @@ pub fn read_usage_history_24h(path: &Path, now_ms: i64) -> HashMap<String, Vec<U
 
 // ─── rate-limit-event buckets (429/529 counts) ───────────────────────────────
 
+/// Per-account rate-limit event tally.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RlAccount {
+    /// Count of rate-limit events for this account today.
     pub count_today: u32,
     /// 24 hourly counts of rate-limit events, oldest [0] → current [23].
     pub buckets_24h: Vec<u32>,
@@ -93,10 +99,15 @@ impl Default for RlAccount {
     }
 }
 
+/// Aggregated rate-limit data across all accounts (the `/api/state.rate_limits`
+/// + `/api/evy/rate-limits` source).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RlData {
+    /// Total rate-limit events across all accounts today.
     pub today_total: u32,
+    /// Count of 429s within the trailing 2h window (drives verdict).
     pub recent_429_count: u32,
+    /// Per-account tallies, keyed by alias.
     pub by_account: HashMap<String, RlAccount>,
 }
 

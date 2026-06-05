@@ -58,7 +58,7 @@ use evy_policy::Policy;
 use evy_providers::HmacKey;
 use evy_scheduler::{Job, JobAction, JobId, RunOutcome, Scheduler};
 use futures_util::StreamExt;
-use serde_json::{json, Value};
+use serde_json::json;
 use tempfile::tempdir;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -463,18 +463,10 @@ async fn daily_standup_workflow_runs_end_to_end_on_v4() {
     assert_eq!(jobs_listed[0].id, job_id);
     assert!(jobs_listed[0].enabled);
 
-    // Belt-and-braces: legacy /api/master alias still works.
-    let alias: Value = reqwest::get(format!("{dashboard_url}/api/master/scheduler/jobs"))
-        .await
-        .expect("GET master jobs")
-        .json()
-        .await
-        .expect("parse master jobs JSON");
-    assert!(
-        alias.is_array(),
-        "legacy /api/master alias must still serve arrays"
-    );
-    assert_eq!(alias.as_array().unwrap().len(), 1);
+    // NOTE: the legacy `/api/master/*` aliases were intentionally dropped in the
+    // full-cutover Phase 0 (so `/api/master/events|chat` fall through to the v3
+    // Bun dashboard's Fork A bridge). The native `/api/evy/scheduler/jobs` above
+    // is the operator surface; `/api/master/*` now reverse-proxies to v3.
 
     // ── 16. Drain everything cleanly so the test leaves no file
     //        handles / sockets / tokio tasks behind. ────────────────────

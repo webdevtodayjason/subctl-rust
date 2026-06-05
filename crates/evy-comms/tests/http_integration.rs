@@ -145,27 +145,26 @@ async fn policy_endpoint_serves_default_policy() {
 }
 
 #[tokio::test]
-async fn master_alias_routes_to_evy() {
+async fn master_alias_dropped_post_cutover() {
+    // Full-cutover Phase 0 dropped the native `/api/master/*` aliases so they
+    // fall through to the reverse-proxy → the v3 Bun dashboard. The native
+    // `/api/evy/*` routes still serve directly; `/api/master/*` is no longer
+    // natively handled (no Bun upstream in this harness → non-200).
     let (base, _bcast, shutdown) = spawn_stub_server().await;
 
     let res_evy = reqwest::get(format!("{base}/api/evy/workers"))
         .await
         .unwrap();
+    assert_eq!(res_evy.status(), 200, "native /api/evy/* still serves");
+
     let res_master = reqwest::get(format!("{base}/api/master/workers"))
         .await
         .unwrap();
-
-    assert_eq!(res_evy.status(), 200);
-    assert_eq!(res_master.status(), 200);
-
-    let body_evy: Value = res_evy.json().await.unwrap();
-    let body_master: Value = res_master.json().await.unwrap();
-    assert_eq!(body_evy, body_master);
-
-    let res_master_jobs = reqwest::get(format!("{base}/api/master/scheduler/jobs"))
-        .await
-        .unwrap();
-    assert_eq!(res_master_jobs.status(), 200);
+    assert_ne!(
+        res_master.status(),
+        200,
+        "/api/master/* must no longer be natively handled post-cutover"
+    );
 
     shutdown.cancel();
 }

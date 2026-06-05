@@ -229,8 +229,12 @@ async fn post_chat_returns_404_for_unknown_session() {
 }
 
 #[tokio::test]
-async fn post_chat_master_alias_route_also_works() {
-    // Same behaviour, different prefix — legacy curl recipes.
+async fn post_chat_master_alias_dropped_in_cutover() {
+    // The legacy `/api/master/chat` alias was intentionally removed in the
+    // full-cutover Phase 0 so it falls through to the reverse-proxy → the v3 Bun
+    // dashboard's Fork A chat bridge. With no Bun upstream in this harness, it
+    // must NOT be served natively (the native chat handler only answers on
+    // `/api/evy/chat`); the catch-all proxy returns a non-200 (502, no upstream).
     let backend = ScriptedBackend::new(vec!["via alias"]);
     let partner = Arc::new(ThinkingPartner::new(backend));
     let state = Arc::new(ChatTestState {
@@ -248,9 +252,11 @@ async fn post_chat_master_alias_route_also_works() {
         .send()
         .await
         .expect("send");
-    assert_eq!(res.status(), 200);
-    let body: ChatResponse = res.json().await.unwrap();
-    assert_eq!(body.response, "via alias");
+    assert_ne!(
+        res.status(),
+        200,
+        "/api/master/chat must not be natively handled post-cutover"
+    );
     shutdown.cancel();
 }
 

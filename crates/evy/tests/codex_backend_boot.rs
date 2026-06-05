@@ -121,6 +121,7 @@ async fn daemon_boots_with_codex_thinking_partner() -> Result<()> {
                 host: "127.0.0.1".to_string(),
                 port: 0,
                 allow_origins: Vec::new(),
+                static_dir: None,
             },
             telegram: None,
             discord: None,
