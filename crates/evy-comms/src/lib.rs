@@ -89,6 +89,8 @@ pub mod dashboard_state;
 pub mod usage_cache;
 // ── Cutover Phase 1 slice 1d: rate-limit + usage-history 24h buckets ──
 pub mod rate_limits;
+// ── Cutover Phase 1 slice 1e: /api/evy/accounts (integrated) ──
+pub mod accounts_http;
 
 // ── Public re-exports — the surface the daemon binary consumes ───────
 

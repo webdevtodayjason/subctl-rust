@@ -389,6 +389,8 @@ fn build_router(
     // (Fork A bridge + master proxy). Specific routes above always win.
     router = router
         .route("/api/host", get(crate::proxy_http::host_handler))
+        // Phase 1 — native /api/evy/accounts (accounts + auth + usage + verdict).
+        .route("/api/evy/accounts", get(crate::accounts_http::accounts_handler))
         // /api/live (web terminal WS) — WS upgrade can't go through the HTTP
         // reverse-proxy, so it's bridged separately. Specific route wins over
         // the catch-all below.
