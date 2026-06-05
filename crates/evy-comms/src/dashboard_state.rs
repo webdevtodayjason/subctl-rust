@@ -111,6 +111,59 @@ pub fn compute_account_verdict(a: &AccountVerdictInput) -> AccountVerdict {
     AccountVerdict { verdict: level, reasons }
 }
 
+/// Severity ordering for the global dispatch best-of (green<yellow<red).
+fn severity(v: Verdict) -> u8 {
+    match v {
+        Verdict::Green => 0,
+        Verdict::Yellow => 1,
+        Verdict::Red => 2,
+    }
+}
+
+/// Global dispatch verdict — port of v3 `dispatchVerdict` (server.ts:1788-1815).
+/// **Best-of by verdict SEVERITY** (least-severe account wins), NOT lowest weekly
+/// util (that's only a cosmetic UI best-account hint). Empty → red "No accounts
+/// configured". `reasons` lists every account: green → "{alias}: GO", else
+/// "{alias}: {VERDICT} — {why}".
+#[must_use]
+pub fn dispatch_verdict(accounts: &[(String, AccountVerdict)]) -> AccountVerdict {
+    if accounts.is_empty() {
+        return AccountVerdict {
+            verdict: Verdict::Red,
+            reasons: vec!["No accounts configured".to_string()],
+        };
+    }
+    let mut best = Verdict::Red;
+    for (_, av) in accounts {
+        if severity(av.verdict) < severity(best) {
+            best = av.verdict;
+        }
+        if best == Verdict::Green {
+            break;
+        }
+    }
+    let reasons = accounts
+        .iter()
+        .map(|(alias, av)| match av.verdict {
+            Verdict::Green => format!("{alias}: GO"),
+            other => {
+                let upper = match other {
+                    Verdict::Yellow => "YELLOW",
+                    Verdict::Red => "RED",
+                    Verdict::Green => unreachable!(),
+                };
+                let why = av.reasons.join(", ");
+                if why.is_empty() {
+                    format!("{alias}: {upper}")
+                } else {
+                    format!("{alias}: {upper} — {why}")
+                }
+            }
+        })
+        .collect();
+    AccountVerdict { verdict: best, reasons }
+}
+
 // ─── slice 1b: per-account auth status (ported from v3 authStatus) ────────────
 
 /// Per-account auth readiness. Serializes to v3's `"ready" | "not_authenticated"`.
@@ -276,6 +329,51 @@ mod tests {
         let d = tmpdir();
         assert_eq!(auth_status(&d), AuthStatus::NotAuthenticated);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    fn av(v: Verdict, reasons: &[&str]) -> AccountVerdict {
+        AccountVerdict { verdict: v, reasons: reasons.iter().map(|s| s.to_string()).collect() }
+    }
+
+    #[test]
+    fn dispatch_empty_is_red() {
+        let d = dispatch_verdict(&[]);
+        assert_eq!(d.verdict, Verdict::Red);
+        assert_eq!(d.reasons, vec!["No accounts configured"]);
+    }
+
+    #[test]
+    fn dispatch_is_best_of_severity_not_lowest_util() {
+        // A: red (5 parallel) but would be "lowest util"; B: green. Severity-best-of → green.
+        let d = dispatch_verdict(&[
+            ("acctA".to_string(), av(Verdict::Red, &["5 parallel sessions on this account"])),
+            ("acctB".to_string(), av(Verdict::Green, &[])),
+        ]);
+        assert_eq!(d.verdict, Verdict::Green); // not red — proves severity best-of
+    }
+
+    #[test]
+    fn dispatch_reasons_format() {
+        let d = dispatch_verdict(&[
+            ("claude-jason".to_string(), av(Verdict::Green, &[])),
+            ("claude-titanium".to_string(), av(Verdict::Yellow, &["weekly 72%"])),
+            ("claude-semfreak".to_string(), av(Verdict::Red, &[])),
+        ]);
+        assert_eq!(d.verdict, Verdict::Green); // jason green wins
+        assert_eq!(d.reasons, vec![
+            "claude-jason: GO",
+            "claude-titanium: YELLOW — weekly 72%",
+            "claude-semfreak: RED",
+        ]);
+    }
+
+    #[test]
+    fn dispatch_all_red_is_red() {
+        let d = dispatch_verdict(&[
+            ("a".to_string(), av(Verdict::Red, &["x"])),
+            ("b".to_string(), av(Verdict::Yellow, &["y"])),
+        ]);
+        assert_eq!(d.verdict, Verdict::Yellow); // best of red+yellow = yellow
     }
 
     #[test]
