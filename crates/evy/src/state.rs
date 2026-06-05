@@ -33,6 +33,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use evy_comms::{AppState, JobSummary, WorkerSummary};
+use evy_core::WorkerRegistry;
 use evy_memory::ObservationLog;
 use evy_policy::Policy;
 use evy_scheduler::Scheduler;
@@ -68,6 +69,10 @@ pub struct DaemonAppState {
     /// P2 — display label for the active supervisor model, surfaced in the
     /// `/api/evy/context` meter (e.g. `"lm-studio/gemma-4-26b-a4b-it-mlx"`).
     pub supervisor_label: Option<String>,
+    /// Cutover Phase 2 (2b) — the shared worker registry. `workers()` maps it to
+    /// `WorkerSummary`; the dispatch path (2c) registers workers into the same
+    /// `Arc`-backed instance. Empty by default (no workers until a dispatch runs).
+    pub worker_registry: WorkerRegistry,
 }
 
 impl DaemonAppState {
@@ -87,7 +92,16 @@ impl DaemonAppState {
             thinking_partner: None,
             skills: None,
             supervisor_label: None,
+            worker_registry: WorkerRegistry::new(),
         }
+    }
+
+    /// Attach a shared worker registry (the dispatch path holds a clone of the
+    /// same `Arc`-backed instance). Builder-style for top-down construction.
+    #[must_use]
+    pub fn with_worker_registry(mut self, registry: WorkerRegistry) -> Self {
+        self.worker_registry = registry;
+        self
     }
 
     /// Attach a thinking-partner. Builder-style so the daemon
@@ -118,10 +132,18 @@ impl DaemonAppState {
 #[async_trait]
 impl AppState for DaemonAppState {
     async fn workers(&self) -> Vec<WorkerSummary> {
-        // Phase 3 Slice E: no worker registry yet. Dashboard sees an
-        // empty list; populating is additive when REPORT.md follow-up
-        // #7 (worker registry) lands.
-        Vec::new()
+        // Cutover Phase 2 (2b): map the shared worker registry to the wire
+        // shape. Empty until the dispatch path (2c) registers a worker.
+        self.worker_registry
+            .list()
+            .into_iter()
+            .map(|r| WorkerSummary {
+                id: r.id,
+                provider: r.provider,
+                mandate_id: r.mandate_id,
+                status: r.status,
+            })
+            .collect()
     }
 
     async fn jobs(&self) -> Vec<JobSummary> {
