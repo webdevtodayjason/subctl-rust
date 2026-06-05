@@ -17,12 +17,14 @@ pub mod error;
 pub mod mandate;
 pub mod policy;
 pub mod provider;
+pub mod registry;
 pub mod worker;
 
 pub use error::{Error, Result};
 pub use mandate::{Mandate, MandateId};
 pub use policy::PolicyMode;
 pub use provider::{Provider, ProviderKind};
+pub use registry::{WorkerRecord, WorkerRegistry};
 pub use worker::{WorkerHandle, WorkerId, WorkerStatus};
 
 #[cfg(test)]
