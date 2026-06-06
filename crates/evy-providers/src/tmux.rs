@@ -84,6 +84,28 @@ pub(crate) async fn session_exists(scope: TmuxScope, session: &str) -> Result<bo
     Ok(output.status.success())
 }
 
+/// Public liveness probe for the Orch panel: is the named tmux session alive?
+/// Swallows tmux errors as "not alive" — callers want a bool, not a `Result`.
+pub async fn tmux_session_alive(session: &str) -> bool {
+    session_exists(TmuxScope(ProviderKind::ClaudeCode), session)
+        .await
+        .unwrap_or(false)
+}
+
+/// Public, idempotent `tmux kill-session -t <session>` for the Orch panel's kill
+/// action. A missing session is treated as success (already gone).
+///
+/// # Errors
+/// [`Error::Provider`] only if the session exists but tmux fails to kill it.
+pub async fn tmux_kill_session(session: &str) -> Result<()> {
+    let scope = TmuxScope(ProviderKind::ClaudeCode);
+    if !session_exists(scope, session).await? {
+        return Ok(());
+    }
+    run_tmux(scope, &["kill-session", "-t", session]).await?;
+    Ok(())
+}
+
 /// `tmux new-window -t <session> -n <name> -c <cwd>`.
 ///
 /// Opens a new window in the named session. The session must already

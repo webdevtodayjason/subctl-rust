@@ -41,6 +41,9 @@ pub struct WorkerRecord {
     pub last_nudge_at_ms: Option<i64>,
     /// Last time the worker replied (unix-millis).
     pub last_reply_at_ms: Option<i64>,
+    /// The tmux session hosting this worker (set by the spawn path). Enables
+    /// liveness checks + kill from the Orch panel.
+    pub tmux_session: Option<String>,
 }
 
 impl WorkerRecord {
@@ -59,6 +62,7 @@ impl WorkerRecord {
             classification: None,
             last_nudge_at_ms: None,
             last_reply_at_ms: None,
+            tmux_session: None,
         }
     }
 }
@@ -120,6 +124,19 @@ impl WorkerRegistry {
                 if last_event.is_some() {
                     r.last_event = last_event;
                 }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Record the tmux session hosting a worker (set by the spawn path after the
+    /// session is created). Returns `false` if the worker is unknown.
+    pub fn set_tmux_session(&self, id: &WorkerId, session: String) -> bool {
+        let mut g = self.write();
+        match g.get_mut(id) {
+            Some(r) => {
+                r.tmux_session = Some(session);
                 true
             }
             None => false,
@@ -218,6 +235,17 @@ mod tests {
         assert_eq!(reg.remove(&id).unwrap().id, id);
         assert!(reg.is_empty());
         assert!(reg.remove(&id).is_none());
+    }
+
+    #[test]
+    fn set_tmux_session_records_and_reports_unknown() {
+        let reg = WorkerRegistry::new();
+        let r = rec(1000);
+        let id = r.id;
+        reg.register(r);
+        assert!(reg.set_tmux_session(&id, "claude-tmp".into()));
+        assert_eq!(reg.get(&id).unwrap().tmux_session.as_deref(), Some("claude-tmp"));
+        assert!(!reg.set_tmux_session(&WorkerId::new(), "x".into()));
     }
 
     #[test]

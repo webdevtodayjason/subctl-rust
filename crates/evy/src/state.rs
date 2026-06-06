@@ -226,10 +226,11 @@ impl AppState for DaemonAppState {
             .unwrap_or("evy")
             .replace([' ', '.', ':'], "_");
 
+        let session = format!("claude-{session_slug}");
         let config = ClaudeCodeConfig {
             claude_config_dir: row.config_dir.clone(),
             claude_bin: claude_bin_path(),
-            tmux_session: format!("claude-{session_slug}"),
+            tmux_session: session.clone(),
             working_dir,
             policy_mode: PolicyMode::Gated,
             hmac_key: None,
@@ -253,7 +254,7 @@ impl AppState for DaemonAppState {
             metadata: HashMap::new(),
         };
         let now_ms = chrono::Utc::now().timestamp_millis();
-        crate::dispatch::dispatch_and_register(
+        let worker_id = crate::dispatch::dispatch_and_register(
             &provider,
             &mandate,
             &self.worker_registry,
@@ -261,7 +262,44 @@ impl AppState for DaemonAppState {
             now_ms,
         )
         .await
-        .map_err(|e| SpawnError::Spawn(e.to_string()))
+        .map_err(|e| SpawnError::Spawn(e.to_string()))?;
+        // 2l — record the hosting session so the Orch panel can probe liveness + kill.
+        self.worker_registry.set_tmux_session(&worker_id, session);
+        Ok(worker_id)
+    }
+
+    async fn orchestrations(&self) -> Vec<evy_comms::OrchestrationRow> {
+        let mut rows = Vec::new();
+        for r in self.worker_registry.list() {
+            let alive = match &r.tmux_session {
+                Some(s) => evy_providers::tmux_session_alive(s).await,
+                None => false,
+            };
+            rows.push(evy_comms::OrchestrationRow {
+                worker_id: r.id,
+                provider: r.provider,
+                status: format!("{:?}", r.status),
+                tmux_session: r.tmux_session.clone(),
+                alive,
+                age_seconds: ((chrono::Utc::now().timestamp_millis() - r.created_at_ms).max(0)
+                    / 1000) as u64,
+                last_event: r.last_event.clone(),
+            });
+        }
+        rows
+    }
+
+    async fn kill_worker(&self, id: WorkerId) -> std::result::Result<bool, SpawnError> {
+        let Some(rec) = self.worker_registry.get(&id) else {
+            return Ok(false); // unknown worker — nothing to kill
+        };
+        if let Some(session) = rec.tmux_session.as_deref() {
+            evy_providers::tmux_kill_session(session)
+                .await
+                .map_err(|e| SpawnError::Spawn(e.to_string()))?;
+        }
+        self.worker_registry.remove(&id);
+        Ok(true)
     }
 }
 

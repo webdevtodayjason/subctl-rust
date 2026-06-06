@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::{
-    extract::State,
+    extract::{Path as AxPath, State},
     http::{HeaderValue, StatusCode},
     response::{IntoResponse, Json, Response},
     routing::{any, delete, get, post},
@@ -78,6 +78,26 @@ impl std::fmt::Display for SpawnError {
 
 impl std::error::Error for SpawnError {}
 
+/// One Orch-panel row (Phase 2 slice 2l): a registered worker enriched with
+/// live tmux state, so the dashboard can show running teams + offer kill.
+#[derive(Debug, Clone, Serialize)]
+pub struct OrchestrationRow {
+    /// Stable worker id.
+    pub worker_id: WorkerId,
+    /// Which provider produced it.
+    pub provider: ProviderKind,
+    /// Lifecycle status (debug rendering of `WorkerStatus`).
+    pub status: String,
+    /// The tmux session hosting the worker, if recorded.
+    pub tmux_session: Option<String>,
+    /// Whether that tmux session is currently alive.
+    pub alive: bool,
+    /// Seconds since the worker was registered.
+    pub age_seconds: u64,
+    /// Most recent event description, if any.
+    pub last_event: Option<String>,
+}
+
 /// The daemon's read-only + spawn surface as the HTTP layer sees it.
 ///
 /// The HTTP server reads workers / jobs / policy and observes events via SSE;
@@ -131,6 +151,22 @@ pub trait AppState: Send + Sync + 'static {
     /// [`SpawnError`] when the account is unknown or the tmux/provider spawn fails.
     async fn spawn_worker(&self, _req: SpawnRequest) -> std::result::Result<WorkerId, SpawnError> {
         Err(SpawnError::Unsupported)
+    }
+
+    /// Cutover Phase 2 (2l) — the Orch panel's live worker list (registry +
+    /// tmux liveness). Default empty; `DaemonAppState` overrides.
+    async fn orchestrations(&self) -> Vec<OrchestrationRow> {
+        Vec::new()
+    }
+
+    /// Cutover Phase 2 (2l) — kill a worker by id (kill its tmux session +
+    /// drop it from the registry). `Ok(false)` if the id is unknown. Default
+    /// returns `Ok(false)`; `DaemonAppState` overrides.
+    ///
+    /// # Errors
+    /// [`SpawnError`] if the tmux kill fails.
+    async fn kill_worker(&self, _id: WorkerId) -> std::result::Result<bool, SpawnError> {
+        Ok(false)
     }
 }
 
@@ -435,6 +471,12 @@ fn build_router(
         .route("/api/evy/accounts", get(crate::accounts_http::accounts_handler))
         // Phase 2 (2j) — native worker spawn (criterion #1).
         .route("/api/evy/orchestration/spawn", post(spawn_handler))
+        // Phase 2 (2l) — Orch panel: live worker list + kill.
+        .route("/api/evy/orchestration", get(orchestration_list_handler))
+        .route(
+            "/api/evy/orchestration/{id}/kill",
+            post(orchestration_kill_handler),
+        )
         // Phase 2 (2m) — native team-template CRUD. `/tools` is reverse-proxied
         // (still v3) and registered as a literal so it wins over `/{name}`.
         .route(
@@ -554,6 +596,31 @@ async fn spawn_handler(State(state): State<HttpState>, Json(req): Json<SpawnRequ
         Err(e @ SpawnError::AccountNotFound(_)) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /api/evy/orchestration` (Phase 2 slice 2l) — live worker list.
+async fn orchestration_list_handler(State(state): State<HttpState>) -> impl IntoResponse {
+    Json(state.app.orchestrations().await)
+}
+
+/// `POST /api/evy/orchestration/{id}/kill` (Phase 2 slice 2l) — kill a worker.
+async fn orchestration_kill_handler(
+    State(state): State<HttpState>,
+    AxPath(id): AxPath<WorkerId>,
+) -> Response {
+    match state.app.kill_worker(id).await {
+        Ok(true) => Json(serde_json::json!({ "ok": true, "killed": id })).into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "ok": false, "error": "unknown worker" })),
         )
             .into_response(),
         Err(e) => (
