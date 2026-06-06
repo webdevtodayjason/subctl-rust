@@ -22,13 +22,35 @@ use tokio::process::Command;
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TmuxScope(pub(crate) ProviderKind);
 
+/// Resolve an absolute `tmux` binary. The daemon runs under launchd's minimal
+/// PATH (no Homebrew dirs), so bare `tmux` fails with ENOENT — same PATH
+/// split-brain the absolute-`claude`-bin decision dodges. Honors `EVY_TMUX_BIN`,
+/// then falls back to the common install locations, then bare `tmux`.
+fn tmux_bin() -> std::borrow::Cow<'static, str> {
+    if let Ok(p) = std::env::var("EVY_TMUX_BIN") {
+        if !p.is_empty() {
+            return std::borrow::Cow::Owned(p);
+        }
+    }
+    for p in [
+        "/opt/homebrew/bin/tmux",
+        "/usr/local/bin/tmux",
+        "/usr/bin/tmux",
+    ] {
+        if std::path::Path::new(p).exists() {
+            return std::borrow::Cow::Borrowed(p);
+        }
+    }
+    std::borrow::Cow::Borrowed("tmux")
+}
+
 /// Run `tmux <args>`, returning the captured stdout on success.
 ///
 /// On failure (non-zero exit, command not found, …) returns
 /// [`Error::Provider`] tagged with `scope`. The error reason includes
 /// stderr to make debugging the adapter chain easier.
 async fn run_tmux(scope: TmuxScope, args: &[&str]) -> Result<String> {
-    let output = Command::new("tmux")
+    let output = Command::new(tmux_bin().as_ref())
         .args(args)
         .output()
         .await
@@ -51,7 +73,7 @@ async fn run_tmux(scope: TmuxScope, args: &[&str]) -> Result<String> {
 
 /// `tmux has-session -t <session>`. Cheap liveness probe.
 pub(crate) async fn session_exists(scope: TmuxScope, session: &str) -> Result<bool> {
-    let output = Command::new("tmux")
+    let output = Command::new(tmux_bin().as_ref())
         .args(["has-session", "-t", session])
         .output()
         .await
@@ -183,7 +205,7 @@ pub(crate) async fn paste_text(
 /// gone" — we re-check with [`window_exists`] before erroring).
 pub(crate) async fn kill_window(scope: TmuxScope, session: &str, window: &str) -> Result<()> {
     let target = format!("{session}:{window}");
-    let output = Command::new("tmux")
+    let output = Command::new(tmux_bin().as_ref())
         .args(["kill-window", "-t", target.as_str()])
         .output()
         .await
