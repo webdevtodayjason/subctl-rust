@@ -27,10 +27,9 @@ use crate::tmux::{self, TmuxScope};
 
 const SCOPE: TmuxScope = TmuxScope(ProviderKind::ClaudeCode);
 
-/// Phase-1 boot delay after `claude` launch before the directive is
-/// pasted. v3 polls the pane for `❯` instead; the spec authorizes a
-/// fixed sleep for Phase 1. TODO(phase-2): replace with capture-pane
-/// polling for the `❯` marker so we stop guessing.
+/// Short settle after the TUI reports ready (2h) and before the directive
+/// paste — covers the gap between the input box rendering and accepting input.
+/// The primary wait is now [`wait_for_claude_ready`] (poll), not this sleep.
 const CLAUDE_BOOT_SLEEP: Duration = Duration::from_secs(2);
 
 /// Status-poll interval inside [`ClaudeCodeWorker::wait`].
@@ -172,9 +171,13 @@ impl Provider for ClaudeCodeProvider {
         .await?;
         tmux::press_enter(SCOPE, &self.config.tmux_session, &window_name).await?;
 
-        // Wait for Claude Code's TUI to render before we paste the
-        // mandate. See `CLAUDE_BOOT_SLEEP`'s rustdoc for why this is a
-        // fixed sleep in Phase 1.
+        // 2h — wait for Claude's input box to actually be READY before pasting,
+        // by polling the pane (not a fixed sleep, which raced the ~8-10s TUI
+        // boot and silently dropped the directive). A short settle follows.
+        let ready_target = format!("{}:{}", self.config.tmux_session, window_name);
+        if !wait_for_claude_ready(&ready_target).await {
+            tracing::warn!(window = %window_name, "claude ready-marker not seen in time; pasting anyway");
+        }
         sleep(CLAUDE_BOOT_SLEEP).await;
 
         let buffer_name = buffer_name_for(worker_id);
@@ -398,6 +401,25 @@ fn path_to_arg(p: &Path) -> Result<String> {
 /// assignment followed by the `claude` binary invoked by ABSOLUTE path
 /// (never `command claude`), so the spawned worker resolves the same
 /// native binary regardless of the tmux/launchd PATH.
+/// Cutover Phase 2 (2h) — poll the worker pane until Claude's input box is ready
+/// before pasting the directive. Looks for the `⏵` mode chevron or the `Try "`
+/// empty-input placeholder (or a second `❯` prompt beyond the launch line).
+/// Polls every 500ms up to ~40s; returns whether ready was observed (caller
+/// pastes regardless, degrading to the old fixed-sleep behavior on timeout).
+/// Replaces the fixed `CLAUDE_BOOT_SLEEP` that raced the ~8-10s TUI boot and
+/// silently dropped the paste (surfaced by the criterion-#7 live run).
+async fn wait_for_claude_ready(target: &str) -> bool {
+    for _ in 0..80 {
+        if let Some(pane) = tmux::tmux_capture(target, 80).await {
+            if pane.contains('⏵') || pane.contains("Try \"") || pane.matches('❯').count() >= 2 {
+                return true;
+            }
+        }
+        sleep(Duration::from_millis(500)).await;
+    }
+    false
+}
+
 fn build_launch_line(claude_config_dir: &Path, claude_bin: &Path) -> Result<String> {
     let config_dir = path_to_arg(claude_config_dir)?;
     let claude_bin = path_to_arg(claude_bin)?;
