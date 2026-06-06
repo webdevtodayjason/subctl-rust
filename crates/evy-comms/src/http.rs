@@ -435,6 +435,19 @@ fn build_router(
         .route("/api/evy/accounts", get(crate::accounts_http::accounts_handler))
         // Phase 2 (2j) — native worker spawn (criterion #1).
         .route("/api/evy/orchestration/spawn", post(spawn_handler))
+        // Phase 2 (2m) — native team-template CRUD. `/tools` is reverse-proxied
+        // (still v3) and registered as a literal so it wins over `/{name}`.
+        .route(
+            "/api/evy/teams",
+            get(crate::teams_http::teams_list_handler).post(crate::teams_http::team_post_handler),
+        )
+        .route("/api/evy/teams/tools", any(crate::proxy_http::reverse_proxy_handler))
+        .route(
+            "/api/evy/teams/{name}",
+            get(crate::teams_http::team_get_handler)
+                .put(crate::teams_http::team_put_handler)
+                .delete(crate::teams_http::team_delete_handler),
+        )
         // Phase 1 — native /api/evy/rate-limits (24h buckets + today_total + 429s).
         .route("/api/evy/rate-limits", get(crate::accounts_http::rate_limits_handler))
         // Phase 1 — native /api/state (overlay native accounts+dispatch on Bun base)

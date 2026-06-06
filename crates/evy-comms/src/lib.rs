@@ -91,6 +91,8 @@ pub mod usage_cache;
 pub mod rate_limits;
 // ── Cutover Phase 1 slice 1e: /api/evy/accounts (integrated) ──
 pub mod accounts_http;
+// ── Cutover Phase 2 slice 2m: team-template CRUD ──
+pub mod teams_http;
 
 // ── Public re-exports — the surface the daemon binary consumes ───────
 
