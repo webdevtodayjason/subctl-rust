@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::{
-    extract::{Path as AxPath, State},
+    extract::{Path as AxPath, Query, State},
     http::{HeaderValue, StatusCode},
     response::{IntoResponse, Json, Response},
     routing::{any, delete, get, post},
@@ -98,6 +98,17 @@ pub struct OrchestrationRow {
     pub last_event: Option<String>,
 }
 
+/// A pane snapshot for one worker (Phase 2 captures — criterion #7 observation).
+#[derive(Debug, Clone, Serialize)]
+pub struct OrchestrationCapture {
+    /// Which worker this capture is from.
+    pub worker_id: WorkerId,
+    /// The tmux session captured, if recorded.
+    pub session: Option<String>,
+    /// The captured pane text (last N lines), or empty if capture failed.
+    pub text: String,
+}
+
 /// The daemon's read-only + spawn surface as the HTTP layer sees it.
 ///
 /// The HTTP server reads workers / jobs / policy and observes events via SSE;
@@ -167,6 +178,13 @@ pub trait AppState: Send + Sync + 'static {
     /// [`SpawnError`] if the tmux kill fails.
     async fn kill_worker(&self, _id: WorkerId) -> std::result::Result<bool, SpawnError> {
         Ok(false)
+    }
+
+    /// Cutover Phase 2 (captures) — pane snapshots of running workers for the
+    /// Orch camera grid + criterion-#7 observation. `lines` caps each snapshot's
+    /// height. Default empty; `DaemonAppState` overrides.
+    async fn orchestration_captures(&self, _lines: usize) -> Vec<OrchestrationCapture> {
+        Vec::new()
     }
 }
 
@@ -473,6 +491,11 @@ fn build_router(
         .route("/api/evy/orchestration/spawn", post(spawn_handler))
         // Phase 2 (2l) — Orch panel: live worker list + kill.
         .route("/api/evy/orchestration", get(orchestration_list_handler))
+        // Phase 2 (captures) — pane snapshots for the camera grid / criterion #7.
+        .route(
+            "/api/evy/orchestration/captures",
+            get(orchestration_captures_handler),
+        )
         .route(
             "/api/evy/orchestration/{id}/kill",
             post(orchestration_kill_handler),
@@ -629,6 +652,21 @@ async fn orchestration_kill_handler(
         )
             .into_response(),
     }
+}
+
+/// Query for `GET /api/evy/orchestration/captures`.
+#[derive(Debug, Deserialize)]
+struct CapturesParams {
+    lines: Option<usize>,
+}
+
+/// `GET /api/evy/orchestration/captures?lines=N` (criterion #7 observation).
+async fn orchestration_captures_handler(
+    State(state): State<HttpState>,
+    Query(q): Query<CapturesParams>,
+) -> impl IntoResponse {
+    let lines = q.lines.unwrap_or(40).clamp(1, 400);
+    Json(serde_json::json!({ "captures": state.app.orchestration_captures(lines).await }))
 }
 
 async fn jobs_handler(State(state): State<HttpState>) -> impl IntoResponse {

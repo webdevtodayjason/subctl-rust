@@ -71,6 +71,21 @@ async fn run_tmux(scope: TmuxScope, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// Public pane-capture for the Orch panel / criterion-#7 observation: returns
+/// the last `lines` rows of the session's active pane, or `None` if capture
+/// fails (session gone, tmux error). Trailing blank lines are trimmed.
+pub async fn tmux_capture(session: &str, lines: usize) -> Option<String> {
+    let scope = TmuxScope(ProviderKind::ClaudeCode);
+    let out = run_tmux(scope, &["capture-pane", "-p", "-t", session]).await.ok()?;
+    let trimmed: Vec<&str> = out.lines().collect();
+    let end = trimmed
+        .iter()
+        .rposition(|l| !l.trim().is_empty())
+        .map_or(0, |i| i + 1);
+    let start = end.saturating_sub(lines);
+    Some(trimmed[start..end].join("\n"))
+}
+
 /// `tmux has-session -t <session>`. Cheap liveness probe.
 pub(crate) async fn session_exists(scope: TmuxScope, session: &str) -> Result<bool> {
     let output = Command::new(tmux_bin().as_ref())

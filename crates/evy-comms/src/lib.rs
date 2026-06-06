@@ -100,8 +100,8 @@ pub use config::{HttpConfig, DEFAULT_HOST, DEFAULT_PORT};
 pub use error::{CommsError, Result};
 pub use events::DaemonEvent;
 pub use http::{
-    AppState, BoundHttpServer, HttpServer, JobSummary, OrchestrationRow, SpawnError, SpawnRequest,
-    StubAppState, WorkerSummary,
+    AppState, BoundHttpServer, HttpServer, JobSummary, OrchestrationCapture, OrchestrationRow,
+    SpawnError, SpawnRequest, StubAppState, WorkerSummary,
 };
 pub use sse::EventBroadcaster;
 

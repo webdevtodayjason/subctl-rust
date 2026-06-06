@@ -301,6 +301,25 @@ impl AppState for DaemonAppState {
         self.worker_registry.remove(&id);
         Ok(true)
     }
+
+    async fn orchestration_captures(
+        &self,
+        lines: usize,
+    ) -> Vec<evy_comms::OrchestrationCapture> {
+        let mut out = Vec::new();
+        for r in self.worker_registry.list() {
+            let text = match &r.tmux_session {
+                Some(s) => evy_providers::tmux_capture(s, lines).await.unwrap_or_default(),
+                None => String::new(),
+            };
+            out.push(evy_comms::OrchestrationCapture {
+                worker_id: r.id,
+                session: r.tmux_session.clone(),
+                text,
+            });
+        }
+        out
+    }
 }
 
 /// Path to `accounts.conf` (`SUBCTL_ACCOUNTS_CONF` or `~/.config/subctl/accounts.conf`).
