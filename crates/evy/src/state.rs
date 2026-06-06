@@ -31,10 +31,14 @@
 
 use std::sync::Arc;
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+
 use async_trait::async_trait;
-use evy_comms::{AppState, JobSummary, WorkerSummary};
-use evy_core::WorkerRegistry;
+use evy_comms::{AppState, EventBroadcaster, JobSummary, SpawnError, SpawnRequest, WorkerSummary};
+use evy_core::{Mandate, MandateId, PolicyMode, ProviderKind, WorkerId, WorkerRegistry};
 use evy_memory::ObservationLog;
+use evy_providers::{AccountsStore, ClaudeCodeConfig, ClaudeCodeProvider};
 use evy_policy::Policy;
 use evy_scheduler::Scheduler;
 use evy_skills::SkillRegistry;
@@ -73,6 +77,10 @@ pub struct DaemonAppState {
     /// `WorkerSummary`; the dispatch path (2c) registers workers into the same
     /// `Arc`-backed instance. Empty by default (no workers until a dispatch runs).
     pub worker_registry: WorkerRegistry,
+    /// Cutover Phase 2 (2j) — the SSE broadcaster, shared with the HTTP server,
+    /// so `spawn_worker` emits `WorkerRegistered` onto the live bus. Defaults to a
+    /// fresh (subscriber-less) broadcaster; the daemon overrides with the shared one.
+    pub broadcaster: EventBroadcaster,
 }
 
 impl DaemonAppState {
@@ -93,6 +101,7 @@ impl DaemonAppState {
             skills: None,
             supervisor_label: None,
             worker_registry: WorkerRegistry::new(),
+            broadcaster: EventBroadcaster::default(),
         }
     }
 
@@ -101,6 +110,14 @@ impl DaemonAppState {
     #[must_use]
     pub fn with_worker_registry(mut self, registry: WorkerRegistry) -> Self {
         self.worker_registry = registry;
+        self
+    }
+
+    /// Attach the shared SSE broadcaster so `spawn_worker` emits onto the same
+    /// bus the HTTP server serves. Builder-style.
+    #[must_use]
+    pub fn with_event_broadcaster(mut self, broadcaster: EventBroadcaster) -> Self {
+        self.broadcaster = broadcaster;
         self
     }
 
@@ -185,6 +202,88 @@ impl AppState for DaemonAppState {
     fn supervisor_label(&self) -> Option<String> {
         self.supervisor_label.clone()
     }
+
+    /// Cutover Phase 2 (2j) — spawn a real Claude Code worker on `req.account`:
+    /// resolve the account from `accounts.conf`, ensure its tmux session exists
+    /// (2e), construct an account-pinned `ClaudeCodeProvider`, then dispatch +
+    /// register (2c) so `workers()` reflects it. Closes criterion #1 live.
+    async fn spawn_worker(&self, req: SpawnRequest) -> std::result::Result<WorkerId, SpawnError> {
+        let store = AccountsStore::open(&accounts_conf_path())
+            .map_err(|e| SpawnError::Spawn(e.to_string()))?;
+        let row = store
+            .find_row(&req.account)
+            .map_err(|e| SpawnError::Spawn(e.to_string()))?
+            .ok_or_else(|| SpawnError::AccountNotFound(req.account.clone()))?;
+
+        let working_dir = req
+            .project
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| row.config_dir.clone());
+        let session_slug = working_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("evy")
+            .replace([' ', '.', ':'], "_");
+
+        let config = ClaudeCodeConfig {
+            claude_config_dir: row.config_dir.clone(),
+            claude_bin: claude_bin_path(),
+            tmux_session: format!("claude-{session_slug}"),
+            working_dir,
+            policy_mode: PolicyMode::Gated,
+            hmac_key: None,
+        };
+        let provider = ClaudeCodeProvider::new(config);
+        provider
+            .ensure_session()
+            .await
+            .map_err(|e| SpawnError::Spawn(e.to_string()))?;
+
+        let mandate = Mandate {
+            id: MandateId::new(),
+            provider: ProviderKind::ClaudeCode,
+            goal: req.goal,
+            context: String::new(),
+            deliverable: String::new(),
+            done_when: Vec::new(),
+            constraints: Vec::new(),
+            policy_mode: PolicyMode::Gated,
+            timeout: None,
+            metadata: HashMap::new(),
+        };
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        crate::dispatch::dispatch_and_register(
+            &provider,
+            &mandate,
+            &self.worker_registry,
+            &self.broadcaster,
+            now_ms,
+        )
+        .await
+        .map_err(|e| SpawnError::Spawn(e.to_string()))
+    }
+}
+
+/// Path to `accounts.conf` (`SUBCTL_ACCOUNTS_CONF` or `~/.config/subctl/accounts.conf`).
+fn accounts_conf_path() -> PathBuf {
+    std::env::var("SUBCTL_ACCOUNTS_CONF")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_default();
+            PathBuf::from(format!("{home}/.config/subctl/accounts.conf"))
+        })
+}
+
+/// Absolute `claude` binary (`EVY_CLAUDE_BIN` or `~/.local/bin/claude`, the
+/// native install — never bare `claude`, to dodge the PATH split-brain).
+fn claude_bin_path() -> PathBuf {
+    std::env::var("EVY_CLAUDE_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_default();
+            PathBuf::from(format!("{home}/.local/bin/claude"))
+        })
 }
 
 #[cfg(test)]

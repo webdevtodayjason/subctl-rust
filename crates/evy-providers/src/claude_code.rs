@@ -57,6 +57,50 @@ impl ClaudeCodeProvider {
     pub fn config(&self) -> &ClaudeCodeConfig {
         &self.config
     }
+
+    /// Cutover Phase 2 slice 2e — create the pinned tmux session if it doesn't
+    /// already exist, injecting `CLAUDE_CONFIG_DIR` + the team/role/spawn-ts
+    /// markers (ports v3 `teams.sh:576-581`). Idempotent. The daemon's spawn
+    /// path calls this before [`dispatch`](Provider::dispatch), which requires
+    /// the session to exist.
+    ///
+    /// # Errors
+    /// Returns [`Error::Provider`] if the `tmux new-session` call fails or the
+    /// config dir isn't valid UTF-8.
+    pub async fn ensure_session(&self) -> Result<()> {
+        if tmux::session_exists(SCOPE, &self.config.tmux_session).await? {
+            return Ok(());
+        }
+        let cfg_dir = self
+            .config
+            .claude_config_dir
+            .to_str()
+            .ok_or_else(|| Error::Provider {
+                kind: ProviderKind::ClaudeCode,
+                reason: format!(
+                    "claude_config_dir is not valid UTF-8: {}",
+                    self.config.claude_config_dir.display()
+                ),
+            })?;
+        let spawn_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs().to_string())
+            .unwrap_or_else(|_| "0".to_string());
+        tmux::new_session(
+            SCOPE,
+            &self.config.tmux_session,
+            &self.config.working_dir,
+            &[
+                ("CLAUDE_CONFIG_DIR", cfg_dir),
+                ("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1"),
+                ("SUBCTL_AGENT_ROLE", "worker"),
+                ("SUBCTL_SPAWN_TS", &spawn_ts),
+            ],
+            220,
+            50,
+        )
+        .await
+    }
 }
 
 #[async_trait]

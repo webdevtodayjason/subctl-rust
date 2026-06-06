@@ -493,6 +493,9 @@ pub async fn run_daemon_with_shutdown(
         };
         app_state = app_state.with_supervisor_label(label);
     }
+    // Phase 2 (2j) — share the SSE broadcaster so spawn_worker emits
+    // WorkerRegistered onto the same bus the HTTP server serves.
+    app_state = app_state.with_event_broadcaster(event_broadcaster.clone());
     let app_state = Arc::new(app_state);
     let http_server = HttpServer::new(
         config.comms.http.clone().into(),

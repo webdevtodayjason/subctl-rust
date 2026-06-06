@@ -43,16 +43,47 @@ use crate::sse::{into_sse_response, EventBroadcaster};
 
 // ─── public state surface ─────────────────────────────────────────────
 
-/// The daemon's read-only surface as the HTTP layer sees it.
+/// Request body for `POST /api/evy/orchestration/spawn` (Phase 2 slice 2j).
+#[derive(Debug, Clone, Deserialize)]
+pub struct SpawnRequest {
+    /// Account alias to spawn on (e.g. `claude-semfreak`).
+    pub account: String,
+    /// The worker's goal / first directive.
+    pub goal: String,
+    /// Working dir for the spawned session. Defaults to the account config dir.
+    #[serde(default)]
+    pub project: Option<String>,
+}
+
+/// Why a worker spawn failed.
+#[derive(Debug)]
+pub enum SpawnError {
+    /// This `AppState` doesn't support spawning (e.g. the stub).
+    Unsupported,
+    /// The requested account alias wasn't found in `accounts.conf`.
+    AccountNotFound(String),
+    /// The provider / tmux spawn failed; carries the reason.
+    Spawn(String),
+}
+
+impl std::fmt::Display for SpawnError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unsupported => write!(f, "spawning is not supported by this daemon build"),
+            Self::AccountNotFound(a) => write!(f, "account not found: {a}"),
+            Self::Spawn(r) => write!(f, "spawn failed: {r}"),
+        }
+    }
+}
+
+impl std::error::Error for SpawnError {}
+
+/// The daemon's read-only + spawn surface as the HTTP layer sees it.
 ///
-/// The HTTP server does NOT mutate daemon state; the operator dashboard
-/// reads workers / jobs / policy and observes events via SSE. Mutations
-/// (start/stop a worker, register a job) land on a separate command
-/// channel in a later slice.
-///
-/// Phase 2 ships [`StubAppState`] returning empty / default data; the
-/// daemon binary swaps in a real `Arc<dyn AppState>` once 2A's daemon
-/// wiring is extended to publish worker / job state into evy-comms.
+/// The HTTP server reads workers / jobs / policy and observes events via SSE;
+/// the one mutating entry is [`spawn_worker`](AppState::spawn_worker).
+/// [`StubAppState`] returns empty / default data; the daemon binary swaps in a
+/// real `Arc<dyn AppState>` (`DaemonAppState`).
 #[async_trait]
 pub trait AppState: Send + Sync + 'static {
     /// Snapshot of currently-registered workers, oldest first.
@@ -89,6 +120,17 @@ pub trait AppState: Send + Sync + 'static {
     /// daemon overrides it from `[thinking_partner]` config.
     fn supervisor_label(&self) -> Option<String> {
         None
+    }
+
+    /// Cutover Phase 2 (2j) — spawn a worker on the named account, registering
+    /// it so `workers()` reflects it (criterion #1). Default impl returns
+    /// [`SpawnError::Unsupported`] so the stub keeps compiling; the daemon's
+    /// `DaemonAppState` overrides it with the real provider spawn.
+    ///
+    /// # Errors
+    /// [`SpawnError`] when the account is unknown or the tmux/provider spawn fails.
+    async fn spawn_worker(&self, _req: SpawnRequest) -> std::result::Result<WorkerId, SpawnError> {
+        Err(SpawnError::Unsupported)
     }
 }
 
@@ -391,6 +433,8 @@ fn build_router(
         .route("/api/host", get(crate::proxy_http::host_handler))
         // Phase 1 — native /api/evy/accounts (accounts + auth + usage + verdict).
         .route("/api/evy/accounts", get(crate::accounts_http::accounts_handler))
+        // Phase 2 (2j) — native worker spawn (criterion #1).
+        .route("/api/evy/orchestration/spawn", post(spawn_handler))
         // Phase 1 — native /api/evy/rate-limits (24h buckets + today_total + 429s).
         .route("/api/evy/rate-limits", get(crate::accounts_http::rate_limits_handler))
         // Phase 1 — native /api/state (overlay native accounts+dispatch on Bun base)
@@ -478,6 +522,33 @@ async fn events_handler(
 async fn workers_handler(State(state): State<HttpState>) -> impl IntoResponse {
     let workers = state.app.workers().await;
     Json(workers)
+}
+
+/// `POST /api/evy/orchestration/spawn` (Phase 2 slice 2j) — spawn a worker on
+/// the named account; on success the registry (and `/api/evy/workers`) reflects it.
+async fn spawn_handler(State(state): State<HttpState>, Json(req): Json<SpawnRequest>) -> Response {
+    match state.app.spawn_worker(req).await {
+        Ok(worker_id) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "ok": true, "worker_id": worker_id })),
+        )
+            .into_response(),
+        Err(e @ SpawnError::Unsupported) => (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        )
+            .into_response(),
+        Err(e @ SpawnError::AccountNotFound(_)) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        )
+            .into_response(),
+    }
 }
 
 async fn jobs_handler(State(state): State<HttpState>) -> impl IntoResponse {

@@ -85,6 +85,47 @@ pub(crate) async fn new_window(
     Ok(())
 }
 
+/// `tmux new-session -d -s <session> -c <cwd> -x <w> -y <h> -e KEY=VAL …`.
+///
+/// Creates a detached session (Phase 2 slice 2e). `env` pairs become `-e KEY=VAL`
+/// flags so the spawned worker inherits `CLAUDE_CONFIG_DIR` + the team/role
+/// markers. Ports the v3 `teams.sh:576-581` create line (mouse/wheel ergonomics
+/// are deferred — cosmetic, not needed for dispatch).
+pub(crate) async fn new_session(
+    scope: TmuxScope,
+    session: &str,
+    cwd: &Path,
+    env: &[(&str, &str)],
+    width: u16,
+    height: u16,
+) -> Result<()> {
+    let cwd_str = cwd.to_str().ok_or_else(|| Error::Provider {
+        kind: scope.0,
+        reason: format!("cwd is not valid UTF-8: {}", cwd.display()),
+    })?;
+    let w = width.to_string();
+    let h = height.to_string();
+    let mut args: Vec<String> = vec![
+        "new-session".into(),
+        "-d".into(),
+        "-s".into(),
+        session.into(),
+        "-c".into(),
+        cwd_str.into(),
+        "-x".into(),
+        w,
+        "-y".into(),
+        h,
+    ];
+    for (k, v) in env {
+        args.push("-e".into());
+        args.push(format!("{k}={v}"));
+    }
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    run_tmux(scope, &argv).await?;
+    Ok(())
+}
+
 /// `tmux send-keys -t <session>:<window> <keys>`.
 ///
 /// Use this for short key sequences ("Enter", "C-c", a short command).

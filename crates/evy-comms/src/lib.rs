@@ -97,7 +97,10 @@ pub mod accounts_http;
 pub use config::{HttpConfig, DEFAULT_HOST, DEFAULT_PORT};
 pub use error::{CommsError, Result};
 pub use events::DaemonEvent;
-pub use http::{AppState, BoundHttpServer, HttpServer, JobSummary, StubAppState, WorkerSummary};
+pub use http::{
+    AppState, BoundHttpServer, HttpServer, JobSummary, SpawnError, SpawnRequest, StubAppState,
+    WorkerSummary,
+};
 pub use sse::EventBroadcaster;
 
 pub use ask::{Ask, AskId, AskRegistry};
