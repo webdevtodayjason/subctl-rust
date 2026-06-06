@@ -106,6 +106,7 @@ async fn daemon_full_smoke_serves_health_jobs_and_shuts_down() -> Result<()> {
             }),
             codex: Some(CodexConfigToml {
                 codex_home: dir.path().join("codex-home"),
+                codex_bin: None,
                 tmux_session: "evy-daemon-smoke-codex".to_string(),
                 working_dir: dir.path().to_path_buf(),
                 model: None,

@@ -246,8 +246,13 @@ fn launch_command(cfg: &CodexConfig) -> Result<String> {
             cfg.working_dir.display()
         ),
     })?;
+    let bin = cfg.codex_bin.to_str().ok_or_else(|| Error::Provider {
+        kind: ProviderKind::Codex,
+        reason: format!("codex_bin is not valid UTF-8: {}", cfg.codex_bin.display()),
+    })?;
     let trust_arg = format!("projects.\"{cwd}\".trust_level=\"trusted\"");
-    let mut cmd = format!("CODEX_HOME={home} command codex -c '{trust_arg}'");
+    // Absolute bin (not `command codex`) — launchd PATH lacks Homebrew.
+    let mut cmd = format!("CODEX_HOME={home} {bin} -c '{trust_arg}'");
     if let Some(model) = &cfg.model {
         cmd.push_str(&format!(" -c model=\"{model}\""));
     }
@@ -337,6 +342,7 @@ mod tests {
     fn fixture_config() -> CodexConfig {
         CodexConfig {
             codex_home: PathBuf::from("/Users/sem/.codex-jason"),
+            codex_bin: PathBuf::from("/opt/homebrew/bin/codex"),
             tmux_session: "codex-test".to_string(),
             working_dir: PathBuf::from("/tmp/codex-test"),
             model: Some("gpt-5.5".to_string()),
@@ -362,7 +368,9 @@ mod tests {
         let cfg = fixture_config();
         let cmd = launch_command(&cfg).expect("valid utf-8 paths");
         assert!(cmd.starts_with("CODEX_HOME=/Users/sem/.codex-jason"));
-        assert!(cmd.contains("command codex"));
+        // Absolute bin, NOT `command codex` (launchd PATH split-brain dodge).
+        assert!(cmd.contains("/opt/homebrew/bin/codex"));
+        assert!(!cmd.contains("command codex"));
         assert!(cmd.contains("projects.\"/tmp/codex-test\".trust_level=\"trusted\""));
         assert!(cmd.contains("model=\"gpt-5.5\""));
     }

@@ -155,6 +155,10 @@ impl From<ClaudeCodeConfigToml> for ClaudeCodeConfig {
 pub struct CodexConfigToml {
     /// `CODEX_HOME` — picks the per-account `auth.json` + `config.toml`.
     pub codex_home: PathBuf,
+    /// Absolute `codex` binary; defaults to `~/.local/bin/codex` when omitted.
+    /// Pin it to stay independent of the launchd/tmux PATH.
+    #[serde(default)]
+    pub codex_bin: Option<PathBuf>,
     /// Detached tmux session that owns the worker windows.
     pub tmux_session: String,
     /// Working directory the `codex` CLI launches in.
@@ -166,12 +170,21 @@ pub struct CodexConfigToml {
     pub policy_mode: PolicyMode,
 }
 
+/// Default `codex` binary path — `~/.local/bin/codex`, falling back to a bare
+/// `codex` name only if `$HOME` is unset.
+fn default_codex_bin() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(|h| PathBuf::from(h).join(".local/bin/codex"))
+        .unwrap_or_else(|| PathBuf::from("codex"))
+}
+
 impl From<CodexConfigToml> for CodexConfig {
     fn from(toml: CodexConfigToml) -> Self {
         // See ClaudeCodeConfigToml::from — `hmac_key` is attached at
         // daemon boot, never serialized.
         Self {
             codex_home: toml.codex_home,
+            codex_bin: toml.codex_bin.unwrap_or_else(default_codex_bin),
             tmux_session: toml.tmux_session,
             working_dir: toml.working_dir,
             model: toml.model,
@@ -623,6 +636,7 @@ path = "/tmp/policy.toml"
     fn into_codex_config_maps_fields() {
         let t = CodexConfigToml {
             codex_home: PathBuf::from("/h"),
+            codex_bin: None,
             tmux_session: "s".into(),
             working_dir: PathBuf::from("/w"),
             model: Some("gpt-5.5".into()),
@@ -631,6 +645,8 @@ path = "/tmp/policy.toml"
         let c: CodexConfig = t.into();
         assert_eq!(c.codex_home, PathBuf::from("/h"));
         assert_eq!(c.model.as_deref(), Some("gpt-5.5"));
+        // codex_bin defaults to ~/.local/bin/codex when omitted from TOML.
+        assert!(c.codex_bin.ends_with(".local/bin/codex"));
     }
 
     #[test]

@@ -110,6 +110,7 @@ async fn daemon_boots_with_codex_thinking_partner() -> Result<()> {
             }),
             codex: Some(CodexConfigToml {
                 codex_home: dir.path().join("codex-home"),
+                codex_bin: None,
                 tmux_session: "evy-codex-boot-smoke-codex".to_string(),
                 working_dir: dir.path().to_path_buf(),
                 model: None,
@@ -220,6 +221,7 @@ async fn daemon_fails_fast_when_codex_section_missing() -> Result<()> {
             }),
             codex: Some(CodexConfigToml {
                 codex_home: dir.path().join("codex-home"),
+                codex_bin: None,
                 tmux_session: "evy-codex-fail-smoke-codex".to_string(),
                 working_dir: dir.path().to_path_buf(),
                 model: None,

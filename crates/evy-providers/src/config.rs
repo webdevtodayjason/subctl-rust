@@ -69,6 +69,10 @@ pub struct CodexConfig {
     /// Per-account `CODEX_HOME` — Codex CLI reads `auth.json` +
     /// `config.toml` from here.
     pub codex_home: PathBuf,
+    /// Absolute path to the `codex` binary the worker launches. Absolute (not
+    /// bare `codex`) for the same reason as `claude_bin` — the daemon's launchd
+    /// PATH lacks Homebrew, so a bare name fails with ENOENT.
+    pub codex_bin: PathBuf,
     /// Detached tmux session that owns the worker windows. Convention:
     /// `codex-<basename(cwd)>`. Must already exist when `dispatch` is
     /// called.

@@ -64,6 +64,7 @@ async fn phase1_smoke_test_runs_cron_job_and_exits_clean() -> anyhow::Result<()>
             }),
             codex: Some(CodexConfigToml {
                 codex_home: dir.path().join("codex-home"),
+                codex_bin: None,
                 tmux_session: "evy-smoke-codex".to_string(),
                 working_dir: dir.path().to_path_buf(),
                 model: None,

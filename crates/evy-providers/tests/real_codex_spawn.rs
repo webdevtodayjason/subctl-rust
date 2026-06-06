@@ -76,6 +76,7 @@ async fn dispatch_real_codex_worker_and_complete() -> anyhow::Result<()> {
 
     let cfg = CodexConfig {
         codex_home: PathBuf::from(codex_home),
+        codex_bin: PathBuf::from("/opt/homebrew/bin/codex"),
         tmux_session,
         working_dir: PathBuf::from(working_dir),
         // gpt-5.5 because Codex on ChatGPT rejects the default `gpt-5`

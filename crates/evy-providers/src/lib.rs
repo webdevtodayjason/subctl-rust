@@ -75,6 +75,7 @@ mod object_safety {
         };
         let codex_cfg = CodexConfig {
             codex_home: PathBuf::from("/tmp/codex"),
+            codex_bin: PathBuf::from("/tmp/codex-bin/codex"),
             tmux_session: "codex-test".to_string(),
             working_dir: PathBuf::from("/tmp"),
             model: None,
