@@ -67,6 +67,7 @@
 #![warn(missing_docs)]
 
 pub mod config;
+pub mod dispatch;
 pub mod state;
 
 use std::net::SocketAddr;
