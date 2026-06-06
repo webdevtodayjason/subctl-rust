@@ -60,6 +60,43 @@ impl CodexProvider {
     pub fn config(&self) -> &CodexConfig {
         &self.config
     }
+
+    /// Cutover Phase 2 — create the pinned tmux session if absent, injecting
+    /// `CODEX_HOME` + role/spawn-ts markers. Idempotent. Mirrors
+    /// [`ClaudeCodeProvider::ensure_session`](crate::ClaudeCodeProvider::ensure_session);
+    /// the daemon's spawn path calls this before [`dispatch`](Provider::dispatch).
+    ///
+    /// # Errors
+    /// [`Error::Provider`] if `tmux new-session` fails or `codex_home` isn't UTF-8.
+    pub async fn ensure_session(&self) -> Result<()> {
+        if tmux::session_exists(SCOPE, &self.config.tmux_session).await? {
+            return Ok(());
+        }
+        let home = self.config.codex_home.to_str().ok_or_else(|| Error::Provider {
+            kind: ProviderKind::Codex,
+            reason: format!(
+                "codex_home is not valid UTF-8: {}",
+                self.config.codex_home.display()
+            ),
+        })?;
+        let spawn_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs().to_string())
+            .unwrap_or_else(|_| "0".to_string());
+        tmux::new_session(
+            SCOPE,
+            &self.config.tmux_session,
+            &self.config.working_dir,
+            &[
+                ("CODEX_HOME", home),
+                ("SUBCTL_AGENT_ROLE", "worker"),
+                ("SUBCTL_SPAWN_TS", &spawn_ts),
+            ],
+            220,
+            50,
+        )
+        .await
+    }
 }
 
 #[async_trait]

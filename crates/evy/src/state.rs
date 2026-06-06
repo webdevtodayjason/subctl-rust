@@ -38,7 +38,9 @@ use async_trait::async_trait;
 use evy_comms::{AppState, EventBroadcaster, JobSummary, SpawnError, SpawnRequest, WorkerSummary};
 use evy_core::{Mandate, MandateId, PolicyMode, ProviderKind, WorkerId, WorkerRegistry};
 use evy_memory::ObservationLog;
-use evy_providers::{AccountsStore, ClaudeCodeConfig, ClaudeCodeProvider};
+use evy_providers::{
+    AccountsStore, ClaudeCodeConfig, ClaudeCodeProvider, CodexConfig, CodexProvider,
+};
 use evy_policy::Policy;
 use evy_scheduler::Scheduler;
 use evy_skills::SkillRegistry;
@@ -226,24 +228,16 @@ impl AppState for DaemonAppState {
             .unwrap_or("evy")
             .replace([' ', '.', ':'], "_");
 
-        let session = format!("claude-{session_slug}");
-        let config = ClaudeCodeConfig {
-            claude_config_dir: row.config_dir.clone(),
-            claude_bin: claude_bin_path(),
-            tmux_session: session.clone(),
-            working_dir,
-            policy_mode: PolicyMode::Gated,
-            hmac_key: None,
+        // Route on the account's provider (2i — codex-teams completes criterion #1).
+        let is_codex = row.provider == "openai-codex";
+        let provider_kind = if is_codex {
+            ProviderKind::Codex
+        } else {
+            ProviderKind::ClaudeCode
         };
-        let provider = ClaudeCodeProvider::new(config);
-        provider
-            .ensure_session()
-            .await
-            .map_err(|e| SpawnError::Spawn(e.to_string()))?;
-
         let mandate = Mandate {
             id: MandateId::new(),
-            provider: ProviderKind::ClaudeCode,
+            provider: provider_kind,
             goal: req.goal,
             context: String::new(),
             deliverable: String::new(),
@@ -254,15 +248,57 @@ impl AppState for DaemonAppState {
             metadata: HashMap::new(),
         };
         let now_ms = chrono::Utc::now().timestamp_millis();
-        let worker_id = crate::dispatch::dispatch_and_register(
-            &provider,
-            &mandate,
-            &self.worker_registry,
-            &self.broadcaster,
-            now_ms,
-        )
-        .await
-        .map_err(|e| SpawnError::Spawn(e.to_string()))?;
+
+        let (worker_id, session) = if is_codex {
+            let session = format!("codex-{session_slug}");
+            let provider = CodexProvider::new(CodexConfig {
+                codex_home: row.config_dir.clone(),
+                codex_bin: codex_bin_path(),
+                tmux_session: session.clone(),
+                working_dir,
+                model: None, // Codex picks per its config.toml (operator seeds gpt-5.5).
+                policy_mode: PolicyMode::Gated,
+                hmac_key: None,
+            });
+            provider
+                .ensure_session()
+                .await
+                .map_err(|e| SpawnError::Spawn(e.to_string()))?;
+            let id = crate::dispatch::dispatch_and_register(
+                &provider,
+                &mandate,
+                &self.worker_registry,
+                &self.broadcaster,
+                now_ms,
+            )
+            .await
+            .map_err(|e| SpawnError::Spawn(e.to_string()))?;
+            (id, session)
+        } else {
+            let session = format!("claude-{session_slug}");
+            let provider = ClaudeCodeProvider::new(ClaudeCodeConfig {
+                claude_config_dir: row.config_dir.clone(),
+                claude_bin: claude_bin_path(),
+                tmux_session: session.clone(),
+                working_dir,
+                policy_mode: PolicyMode::Gated,
+                hmac_key: None,
+            });
+            provider
+                .ensure_session()
+                .await
+                .map_err(|e| SpawnError::Spawn(e.to_string()))?;
+            let id = crate::dispatch::dispatch_and_register(
+                &provider,
+                &mandate,
+                &self.worker_registry,
+                &self.broadcaster,
+                now_ms,
+            )
+            .await
+            .map_err(|e| SpawnError::Spawn(e.to_string()))?;
+            (id, session)
+        };
         // 2l — record the hosting session so the Orch panel can probe liveness + kill.
         self.worker_registry.set_tmux_session(&worker_id, session);
         Ok(worker_id)
@@ -341,6 +377,21 @@ fn claude_bin_path() -> PathBuf {
             let home = std::env::var("HOME").unwrap_or_default();
             PathBuf::from(format!("{home}/.local/bin/claude"))
         })
+}
+
+/// Absolute `codex` binary (`EVY_CODEX_BIN` or `/opt/homebrew/bin/codex`, then
+/// `~/.local/bin/codex` — never bare `codex`, same launchd-PATH dodge).
+fn codex_bin_path() -> PathBuf {
+    if let Ok(p) = std::env::var("EVY_CODEX_BIN") {
+        return PathBuf::from(p);
+    }
+    for cand in ["/opt/homebrew/bin/codex", "/usr/local/bin/codex"] {
+        if std::path::Path::new(cand).exists() {
+            return PathBuf::from(cand);
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(format!("{home}/.local/bin/codex"))
 }
 
 #[cfg(test)]
