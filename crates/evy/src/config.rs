@@ -81,6 +81,10 @@ pub struct Config {
 pub struct SchedulerConfig {
     /// sqlite db path the scheduler opens; migrations run automatically.
     pub db_path: PathBuf,
+    /// Operator cron-job file synced into the scheduler at boot.
+    /// Defaults to `jobs.toml` next to `db_path`. Missing file = no-op.
+    #[serde(default)]
+    pub jobs_path: Option<PathBuf>,
 }
 
 /// `[policy]` table.

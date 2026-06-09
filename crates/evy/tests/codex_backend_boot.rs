@@ -95,6 +95,7 @@ async fn daemon_boots_with_codex_thinking_partner() -> Result<()> {
     let config = Config {
         scheduler: SchedulerConfig {
             db_path: dir.path().join("scheduler.db"),
+            jobs_path: None,
         },
         policy: PolicyConfig { path: policy_path },
         providers: ProvidersConfig {
@@ -209,6 +210,7 @@ async fn daemon_fails_fast_when_codex_section_missing() -> Result<()> {
     let config = Config {
         scheduler: SchedulerConfig {
             db_path: dir.path().join("scheduler.db"),
+            jobs_path: None,
         },
         policy: PolicyConfig { path: policy_path },
         providers: ProvidersConfig {

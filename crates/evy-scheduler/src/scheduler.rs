@@ -347,10 +347,52 @@ async fn execute_action(action: &JobAction, job: &Job) -> RunOutcome {
             );
             RunOutcome::Succeeded
         }
-        JobAction::InvokeShell(cmd) => {
-            // Trusted-only and stubbed in Phase 1 per slice-C spec.
-            tracing::warn!(job = %job.name, cmd, "invoke-shell stubbed");
-            RunOutcome::Failed("InvokeShell stubbed in Phase 1".into())
+        JobAction::InvokeShell(cmd) => invoke_shell(cmd, job).await,
+    }
+}
+
+/// Hard wall-clock cap on a single `InvokeShell` run. A cron job that
+/// outlives this is killed and the run recorded as `Failed` — the fire
+/// loop must never be wedged by a hung command.
+const INVOKE_SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Run `cmd` under `/bin/sh -c`. Trusted-only — see [`JobAction::InvokeShell`].
+async fn invoke_shell(cmd: &str, job: &Job) -> RunOutcome {
+    let fut = tokio::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(cmd)
+        .kill_on_drop(true)
+        .output();
+    match tokio::time::timeout(INVOKE_SHELL_TIMEOUT, fut).await {
+        Err(_) => {
+            tracing::warn!(job = %job.name, cmd, "invoke-shell timed out");
+            RunOutcome::Failed(format!(
+                "timed out after {}s",
+                INVOKE_SHELL_TIMEOUT.as_secs()
+            ))
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(job = %job.name, cmd, error = %e, "invoke-shell could not spawn");
+            RunOutcome::Failed(format!("spawn failed: {e}"))
+        }
+        Ok(Ok(out)) if out.status.success() => {
+            tracing::info!(job = %job.name, cmd, "invoke-shell succeeded");
+            RunOutcome::Succeeded
+        }
+        Ok(Ok(out)) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let trimmed = stderr.trim();
+            let mut start = trimmed.len().saturating_sub(300);
+            while !trimmed.is_char_boundary(start) {
+                start += 1;
+            }
+            let tail = &trimmed[start..];
+            let code = out
+                .status
+                .code()
+                .map_or_else(|| "signal".to_owned(), |c| c.to_string());
+            tracing::warn!(job = %job.name, cmd, code, "invoke-shell failed");
+            RunOutcome::Failed(format!("exit {code}: {tail}"))
         }
     }
 }
@@ -421,5 +463,58 @@ mod tests {
         s.start().await.unwrap();
         s.stop().await.unwrap();
         s.stop().await.unwrap(); // second call must not panic
+    }
+
+    fn shell_job(cmd: &str) -> Job {
+        Job {
+            id: JobId::new(),
+            name: format!("sh-{}", JobId::new()),
+            cron_expr: "* * * * *".to_owned(),
+            action: JobAction::InvokeShell(cmd.to_owned()),
+            enabled: true,
+            created_at: Utc::now(),
+            last_run: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn invoke_shell_exit_zero_succeeds() {
+        let job = shell_job("true");
+        let outcome = execute_action(&job.action.clone(), &job).await;
+        assert!(matches!(outcome, RunOutcome::Succeeded));
+    }
+
+    #[tokio::test]
+    async fn invoke_shell_nonzero_exit_fails_with_code_and_stderr() {
+        let job = shell_job("echo boom >&2; exit 3");
+        let outcome = execute_action(&job.action.clone(), &job).await;
+        match outcome {
+            RunOutcome::Failed(msg) => {
+                assert!(msg.contains("exit 3"), "msg: {msg}");
+                assert!(msg.contains("boom"), "msg: {msg}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn invoke_shell_command_side_effect_lands() {
+        // Prove the command actually RAN (not just exit-status plumbing):
+        // it must leave a file on disk.
+        let dir = tempdir().unwrap();
+        let marker = dir.path().join("fired.txt");
+        let job = shell_job(&format!("echo fired > {}", marker.display()));
+        let outcome = execute_action(&job.action.clone(), &job).await;
+        assert!(matches!(outcome, RunOutcome::Succeeded));
+        let content = std::fs::read_to_string(&marker).unwrap();
+        assert_eq!(content.trim(), "fired");
+    }
+
+    #[tokio::test]
+    async fn invoke_shell_multibyte_stderr_tail_does_not_panic() {
+        // Tail truncation must respect UTF-8 char boundaries.
+        let job = shell_job("python3 -c \"import sys; sys.stderr.write('é'*400)\" ; exit 1");
+        let outcome = execute_action(&job.action.clone(), &job).await;
+        assert!(matches!(outcome, RunOutcome::Failed(_)));
     }
 }

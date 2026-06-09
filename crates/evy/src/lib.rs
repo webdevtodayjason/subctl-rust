@@ -68,6 +68,7 @@
 
 pub mod config;
 pub mod dispatch;
+pub mod jobs_file;
 pub mod state;
 
 use std::net::SocketAddr;
@@ -160,6 +161,18 @@ async fn boot_components(config: &Config) -> Result<(Scheduler, Vec<Box<dyn Prov
     tracing::info!(
         db = %config.scheduler.db_path.display(),
         "scheduler opened (sqlite migrations applied)",
+    );
+
+    let jobs_path = config
+        .scheduler
+        .jobs_path
+        .clone()
+        .unwrap_or_else(|| config.scheduler.db_path.with_file_name("jobs.toml"));
+    let jobs_synced = jobs_file::sync_jobs_file(&scheduler, &jobs_path).await;
+    tracing::info!(
+        path = %jobs_path.display(),
+        summary = ?jobs_synced,
+        "jobs.toml synced into scheduler",
     );
 
     let policy = load_policy(&config.policy.path)

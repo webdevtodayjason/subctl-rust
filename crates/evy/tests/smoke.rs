@@ -50,6 +50,7 @@ async fn phase1_smoke_test_runs_cron_job_and_exits_clean() -> anyhow::Result<()>
     let config = Config {
         scheduler: SchedulerConfig {
             db_path: db_path.clone(),
+            jobs_path: None,
         },
         policy: PolicyConfig {
             path: policy_path.clone(),

@@ -55,9 +55,11 @@ pub enum JobAction {
     /// pings.
     LogHeartbeat,
 
-    /// Invoke a shell command. Trusted-only and stubbed in Phase 1; the
-    /// fire loop logs the intended command and records the run as
-    /// `Failed("InvokeShell stubbed")`.
+    /// Invoke a shell command. Trusted-only: jobs come exclusively from
+    /// the operator's `jobs.toml` / direct registration, never from
+    /// workers. Runs under `/bin/sh -c` with a 120s hard timeout;
+    /// exit 0 → `Succeeded`, anything else → `Failed` with the exit
+    /// code and a stderr tail.
     InvokeShell(String),
 }
 

@@ -94,6 +94,7 @@ async fn daemon_full_smoke_serves_health_jobs_and_shuts_down() -> Result<()> {
     let config = Config {
         scheduler: SchedulerConfig {
             db_path: scheduler_db.clone(),
+            jobs_path: None,
         },
         policy: PolicyConfig { path: policy_path },
         providers: ProvidersConfig {
@@ -252,6 +253,7 @@ async fn daemon_creates_missing_playbook_dir() -> Result<()> {
     let config = Config {
         scheduler: SchedulerConfig {
             db_path: dir.path().join("scheduler.db"),
+            jobs_path: None,
         },
         policy: PolicyConfig { path: policy_path },
         providers: ProvidersConfig {

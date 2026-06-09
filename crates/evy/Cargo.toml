@@ -41,6 +41,8 @@ anyhow = { workspace = true }
 figment = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# jobs.toml operator cron-job file (boot-time sync).
+toml = { workspace = true }
 clap = { workspace = true }
 
 # DaemonAppState implements the evy-comms AppState trait — async-trait
