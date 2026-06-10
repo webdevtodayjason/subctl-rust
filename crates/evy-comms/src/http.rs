@@ -5,12 +5,23 @@
 //! (sessions list, health, event stream); speculative panels (fitness /
 //! engagement / pending-asks) are intentionally NOT ported per ADR 0020.
 //!
-//! `/api/master/*` is preserved as an alias for `/api/evy/*` so v3-era
-//! curl recipes continue to work. v3 implemented the alias as a URI
-//! rewrite in `dashboard/server.ts` line 2920; we register both prefixes
-//! on the same handler functions because axum 0.8's `Router::layer()`
-//! wraps individual route handlers (not the path matcher), so
-//! middleware can't change which handler dispatches.
+//! The dashboard chat tab speaks the legacy `/api/master/*` dialect. For the
+//! chat-tab surfaces v4 owns natively, we map that dialect onto the canonical
+//! `/api/evy/*` routes with a `tower` `map_request` layer that wraps the
+//! router as a whole and rewrites the request path *before* routing (mirrors
+//! v3's transparent alias in `dashboard/server.ts` line 2920). Running in
+//! front of the matcher — not via `Router::layer()`, which only wraps
+//! already-matched handlers — lets the rewritten path hit the native
+//! `/api/evy/*` handler directly. The transform is request-only, so the
+//! long-lived SSE response (`/api/master/events`) streams through untouched.
+//!
+//! The rewrite is **scoped, not global**: only the chat-tab paths v4 serves
+//! natively are claimed (see [`is_claimed_master_path`]). Every other
+//! `/api/master/*` path — `teams`, `diag`, `supervisor`, `health`, … — is
+//! left UNTOUCHED so it falls through to the `/api/{*rest}` catch-all proxy
+//! and is served by v3, which still owns that data and does its own rename.
+//! Reversing a family's `master`→`evy` ownership is a deliberate per-family
+//! call (the P4–P6 wave), never an implicit side effect of this layer.
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -33,6 +44,7 @@ use evy_thinking::ThinkingPartner;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
+use tower::ServiceBuilder;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
@@ -454,14 +466,12 @@ fn build_router(
 
     let cors = build_cors_layer(allow_origins)?;
 
-    // Each operator-facing route is registered under both the canonical
-    // `/api/evy/...` prefix and the legacy `/api/master/...` alias.
-    // axum 0.8's `Router::layer()` applies middleware to each matched
-    // route rather than wrapping the path matcher, so URI-rewriting in
-    // middleware doesn't change which handler dispatches — we register
-    // the alias path explicitly instead. Mirrors v3 dashboard's
-    // operator-visible behaviour (line 2920 of `dashboard/server.ts`)
-    // even though the rewrite happens in routing rather than a layer.
+    // Operator-facing routes are registered ONCE under the canonical
+    // `/api/evy/...` prefix. The chat tab's legacy `/api/master/...` dialect
+    // reaches the claimed subset via the `rewrite_master_alias` `map_request`
+    // layer applied below, which rewrites the path before routing (mirrors v3
+    // dashboard line 2920) for the chat-tab paths v4 owns natively. Unclaimed
+    // master paths are left untouched and fall through to the v3 proxy.
     let mut router = Router::new()
         .route("/health", get(health_handler))
         .route("/api/version", get(version_handler))
@@ -469,12 +479,13 @@ fn build_router(
         .route("/api/evy/workers", get(workers_handler))
         .route("/api/evy/scheduler/jobs", get(jobs_handler))
         .route("/api/evy/policy", get(policy_handler))
-        // Phase 6 chat surface — POST only; aliased under /api/master
-        // for parity with v3 dashboards even though there's no v3
-        // equivalent (legacy operators may script either prefix).
+        // Phase 6 chat surface — POST only. The dashboard chat tab posts
+        // the legacy `/api/master/chat` form; the rewrite layer below maps
+        // it onto this canonical route (legacy operators may script either
+        // prefix).
         .route("/api/evy/chat", post(crate::chat::chat_handler))
-        // Phase 6 follow-up — TUI-driving endpoints. Aliased under
-        // /api/master for parity with the other operator routes.
+        // Phase 6 follow-up — TUI-driving endpoints. The `/api/master/*`
+        // dialect reaches these via the rewrite layer below.
         .route(
             "/api/evy/sessions",
             get(crate::sessions_http::sessions_list_handler),
@@ -507,10 +518,6 @@ fn build_router(
         )
         .route(
             "/api/evy/transcript/clear",
-            post(crate::transcript_http::clear_handler),
-        )
-        .route(
-            "/api/master/transcript/clear",
             post(crate::transcript_http::clear_handler),
         );
 
@@ -745,7 +752,81 @@ fn build_router(
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
-    Ok(router)
+    // Mirror v3's transparent `/api/master/*` → `/api/evy/*` alias
+    // (`dashboard/server.ts` line 2920) for the CLAIMED chat-tab subset by
+    // rewriting the request path *before* routing. `map_request` runs in
+    // front of the whole router (not via `Router::layer()`, which only wraps
+    // already-matched handlers), so a claimed master path is matched by its
+    // canonical `/api/evy/*` route. Unclaimed master paths are left untouched
+    // and ride the `/api/{*rest}` catch-all proxy to v3. The transform touches
+    // only the request URI, so SSE responses stream through untouched.
+    let rewritten = ServiceBuilder::new()
+        .map_request(rewrite_master_alias)
+        .service(router);
+    Ok(Router::new().fallback_service(rewritten))
+}
+
+/// The `/api/master/<rest>` paths the chat tab uses that v4 owns natively —
+/// the ONLY paths [`rewrite_master_alias`] maps onto `/api/evy/*`. `rest` is
+/// the path with the `/api/master/` prefix already stripped (no query).
+///
+/// Deliberately an allowlist, not a prefix match: every other master path
+/// (`teams`, `diag`, `supervisor`, `health`, `restart`, …) is still owned by
+/// v3, so rewriting it would silently swap the data source (e.g. v3's team
+/// registry for v4's empty one). Reversing a family's ownership is a per-
+/// family decision made in the P4–P6 wave, never here.
+fn is_claimed_master_path(rest: &str) -> bool {
+    matches!(
+        rest,
+        "chat"
+            | "events"
+            | "context"
+            | "transcript"
+            | "transcript/util"
+            | "transcript/compact"
+            | "transcript/clear"
+            | "attachments"
+    )
+}
+
+/// Rewrite a CLAIMED `/api/master/<rest>` request path to `/api/evy/<rest>`,
+/// preserving the query string and any other URI parts. Unclaimed master
+/// paths and all non-master paths pass through untouched. Mirrors v3's
+/// `dashboard/server.ts` alias so the dashboard chat tab's legacy
+/// master-dialect URLs land on v4's native `/api/evy/*` handlers — but only
+/// for the surfaces v4 owns (see [`is_claimed_master_path`]).
+fn rewrite_master_alias(mut req: axum::extract::Request) -> axum::extract::Request {
+    const MASTER_PREFIX: &str = "/api/master/";
+    const EVY_PREFIX: &str = "/api/evy/";
+
+    let uri = req.uri();
+    let Some(rest) = uri.path().strip_prefix(MASTER_PREFIX) else {
+        return req;
+    };
+    if !is_claimed_master_path(rest) {
+        // Unclaimed → leave it for the v3 reverse-proxy, unrewritten.
+        return req;
+    }
+
+    let mut path_and_query = String::with_capacity(EVY_PREFIX.len() + rest.len() + 1);
+    path_and_query.push_str(EVY_PREFIX);
+    path_and_query.push_str(rest);
+    if let Some(query) = uri.query() {
+        path_and_query.push('?');
+        path_and_query.push_str(query);
+    }
+
+    let Ok(new_pq) = path_and_query.parse::<axum::http::uri::PathAndQuery>() else {
+        // Unparseable rewrite (should not happen for a valid incoming URI)
+        // — leave the request untouched rather than corrupt it.
+        return req;
+    };
+    let mut parts = uri.clone().into_parts();
+    parts.path_and_query = Some(new_pq);
+    if let Ok(new_uri) = axum::http::Uri::from_parts(parts) {
+        *req.uri_mut() = new_uri;
+    }
+    req
 }
 
 fn build_cors_layer(allow_origins: &[String]) -> Result<CorsLayer> {
@@ -1042,5 +1123,71 @@ mod tests {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("static");
         let router = build_router(broadcaster, state, &[], Some(&dir)).unwrap();
         let _ = router;
+    }
+
+    fn rewrite(uri: &str) -> String {
+        let req = axum::http::Request::builder()
+            .uri(uri)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        rewrite_master_alias(req).uri().to_string()
+    }
+
+    #[test]
+    fn rewrite_master_alias_maps_every_claimed_chat_tab_path() {
+        // Exactly the chat-tab surfaces v4 owns natively → master maps to evy.
+        for rest in [
+            "chat",
+            "events",
+            "context",
+            "transcript",
+            "transcript/util",
+            "transcript/compact",
+            "transcript/clear",
+            "attachments",
+        ] {
+            assert_eq!(
+                rewrite(&format!("/api/master/{rest}")),
+                format!("/api/evy/{rest}"),
+                "claimed chat-tab path /api/master/{rest} must map to its evy twin"
+            );
+        }
+    }
+
+    #[test]
+    fn rewrite_master_alias_preserves_query_string() {
+        assert_eq!(
+            rewrite("/api/master/transcript?session_id=abc&limit=10"),
+            "/api/evy/transcript?session_id=abc&limit=10"
+        );
+    }
+
+    #[test]
+    fn rewrite_master_alias_leaves_unclaimed_master_paths_untouched() {
+        // Paths v3 still owns must NOT be rewritten — they ride the proxy as-is
+        // so v3 serves its own data (rewriting would swap the data source).
+        // `attachments/{id}` is NOT claimed (the chat tab only POSTs the
+        // collection, never fetches bodies via master dialect).
+        for path in [
+            "/api/master/workers",
+            "/api/master/sessions",
+            "/api/master/skills",
+            "/api/master/teams",
+            "/api/master/diag",
+            "/api/master/health",
+            "/api/master/attachments/abc123",
+        ] {
+            assert_eq!(rewrite(path), path, "{path} must pass through unrewritten");
+        }
+    }
+
+    #[test]
+    fn rewrite_master_alias_leaves_non_master_paths_untouched() {
+        // Canonical evy paths, bare `/api/master` (no trailing slash), and
+        // unrelated routes all pass through unchanged.
+        assert_eq!(rewrite("/api/evy/chat"), "/api/evy/chat");
+        assert_eq!(rewrite("/api/master"), "/api/master");
+        assert_eq!(rewrite("/health"), "/health");
+        assert_eq!(rewrite("/api/state?x=1"), "/api/state?x=1");
     }
 }
