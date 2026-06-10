@@ -215,7 +215,16 @@ impl TelegramBridge {
             let result = self.send_message(&prompt).await?;
             open.insert(result.message_id, ask_id);
         }
-        self.inner.asks.wait_for(ask_id, timeout).await
+        let outcome = self.inner.asks.wait_for(ask_id, timeout).await;
+        // Clear the mapping on ANY exit (resolution already removed it;
+        // timeout did not). A dead entry would otherwise make the
+        // plain-message fallback in `handle_update` see phantom open
+        // asks forever.
+        {
+            let mut open = self.inner.open_asks.lock().await;
+            open.retain(|_, v| *v != ask_id);
+        }
+        outcome
     }
 
     /// Long-poll Telegram for inbound updates until `shutdown` is
@@ -439,6 +448,26 @@ impl TelegramBridge {
                 );
                 return Ok(());
             }
+        }
+
+        // Single-operator ergonomics: a plain message (or a reply to a
+        // stale bubble) answers the ask when EXACTLY ONE is open —
+        // operators type answers directly far more often than they use
+        // Telegram's reply-to (live finding, 2026-06-09). Two or more
+        // open asks are ambiguous and still require reply-to.
+        let lone_ask = {
+            let mut open = self.inner.open_asks.lock().await;
+            if open.len() == 1 {
+                let key = *open.keys().next().expect("len == 1");
+                open.remove(&key)
+            } else {
+                None
+            }
+        };
+        if let Some(ask_id) = lone_ask {
+            self.inner.asks.resolve(ask_id, text.to_string()).await?;
+            debug!(?ask_id, "telegram: resolved lone open ask via plain message");
+            return Ok(());
         }
 
         // Otherwise dispatch as a normal inbound message.

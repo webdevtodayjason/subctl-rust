@@ -328,3 +328,127 @@ async fn send_error_does_not_leak_bot_token() {
         "bot token must not leak through reqwest's Display impl; got: {msg}"
     );
 }
+
+// ── lone-ask plain-message fallback (live finding, 2026-06-09) ───────────
+
+#[tokio::test]
+async fn plain_message_resolves_lone_open_ask() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path(format!("/bot{TOKEN}/sendMessage")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "result": {"message_id": 300}
+        })))
+        .mount(&server)
+        .await;
+
+    // Operator types a PLAIN message — no reply_to_message at all.
+    Mock::given(method("GET"))
+        .and(path(format!("/bot{TOKEN}/getUpdates")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "result": [{
+                "update_id": 1,
+                "message": {
+                    "message_id": 301,
+                    "text": "got it",
+                    "chat": {"id": CHAT_ID},
+                    "from": {"id": 99, "first_name": "Jason"}
+                }
+            }]
+        })))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/bot{TOKEN}/getUpdates")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true, "result": []})))
+        .mount(&server)
+        .await;
+
+    let asks = Arc::new(AskRegistry::new());
+    let bridge = TelegramBridge::new(cfg(&server.uri()), asks.clone());
+
+    let shutdown = CancellationToken::new();
+    let bridge_for_run = bridge.clone();
+    let shutdown_for_run = shutdown.clone();
+    let run_task = tokio::spawn(async move {
+        bridge_for_run.run(shutdown_for_run).await.expect("run ok");
+    });
+
+    let answer = bridge
+        .ask("anyone there?".into(), Duration::from_secs(3))
+        .await
+        .expect("plain message must resolve the lone ask");
+    assert_eq!(answer, "got it");
+
+    shutdown.cancel();
+    run_task.await.expect("run task joined");
+}
+
+#[tokio::test]
+async fn plain_message_after_timed_out_ask_resolves_the_new_one() {
+    // Regression: a timed-out ask must clean its message_id mapping, or
+    // the next ask sees TWO "open" entries and the fallback never fires.
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path(format!("/bot{TOKEN}/sendMessage")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "result": {"message_id": 400}
+        })))
+        .mount(&server)
+        .await;
+    // No updates until the plain answer below.
+    Mock::given(method("GET"))
+        .and(path(format!("/bot{TOKEN}/getUpdates")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "result": [{
+                "update_id": 1,
+                "message": {
+                    "message_id": 401,
+                    "text": "second time lucky",
+                    "chat": {"id": CHAT_ID},
+                    "from": {"id": 99, "first_name": "Jason"}
+                }
+            }]
+        })))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/bot{TOKEN}/getUpdates")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true, "result": []})))
+        .mount(&server)
+        .await;
+
+    let asks = Arc::new(AskRegistry::new());
+    let bridge = TelegramBridge::new(cfg(&server.uri()), asks.clone());
+
+    // First ask times out instantly (no poll loop running yet) — its
+    // mapping must be cleaned up by ask() itself.
+    let timed_out = bridge
+        .ask("first question".into(), Duration::from_millis(10))
+        .await;
+    assert!(timed_out.is_err(), "first ask must time out");
+
+    let shutdown = CancellationToken::new();
+    let bridge_for_run = bridge.clone();
+    let shutdown_for_run = shutdown.clone();
+    let run_task = tokio::spawn(async move {
+        bridge_for_run.run(shutdown_for_run).await.expect("run ok");
+    });
+
+    let answer = bridge
+        .ask("second question".into(), Duration::from_secs(3))
+        .await
+        .expect("plain message must resolve the new lone ask");
+    assert_eq!(answer, "second time lucky");
+
+    shutdown.cancel();
+    run_task.await.expect("run task joined");
+}
