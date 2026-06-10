@@ -498,7 +498,10 @@ pub async fn run_daemon_with_shutdown(
         // P3 — rehydrate persisted sessions before serving so a restart
         // doesn't silently lose the operator's open conversation.
         let restored = partner.restore().await;
-        tracing::info!(restored, "thinking-partner constructed; chat endpoint is live");
+        tracing::info!(
+            restored,
+            "thinking-partner constructed; chat endpoint is live"
+        );
     } else {
         tracing::info!("no [thinking_partner] in config; chat endpoint will return 503");
     }

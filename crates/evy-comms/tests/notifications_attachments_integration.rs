@@ -93,7 +93,9 @@ async fn notifications_tray_via_http() {
 
     // Unknown id → { ok, found:false }.
     let res = client
-        .post(format!("{base}/api/evy/notifications/deadbeef-unknown/read"))
+        .post(format!(
+            "{base}/api/evy/notifications/deadbeef-unknown/read"
+        ))
         .send()
         .await
         .expect("send");

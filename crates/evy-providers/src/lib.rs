@@ -47,11 +47,11 @@ pub use config::{ClaudeCodeConfig, CodexConfig};
 pub use deepseek::{DeepSeekConfig, DeepSeekProvider, DeepSeekWorker};
 pub use hmac::{HmacKey, TrustMarker};
 // Cutover Phase 2 (2l) — Orch panel liveness + kill; (captures) — pane snapshot.
-pub use tmux::{tmux_capture, tmux_kill_session, tmux_session_alive};
 pub use oauth::{
     AccessToken, AccountRecord, AccountRow, AccountsStore, CodexOauth, DeviceCodeResponse,
     OauthError, OauthFlow, RefreshDedup, TokenRecord, XaiOauth,
 };
+pub use tmux::{tmux_capture, tmux_kill_session, tmux_session_alive};
 
 #[cfg(test)]
 mod object_safety {

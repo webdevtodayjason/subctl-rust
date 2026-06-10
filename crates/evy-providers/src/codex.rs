@@ -72,13 +72,17 @@ impl CodexProvider {
         if tmux::session_exists(SCOPE, &self.config.tmux_session).await? {
             return Ok(());
         }
-        let home = self.config.codex_home.to_str().ok_or_else(|| Error::Provider {
-            kind: ProviderKind::Codex,
-            reason: format!(
-                "codex_home is not valid UTF-8: {}",
-                self.config.codex_home.display()
-            ),
-        })?;
+        let home = self
+            .config
+            .codex_home
+            .to_str()
+            .ok_or_else(|| Error::Provider {
+                kind: ProviderKind::Codex,
+                reason: format!(
+                    "codex_home is not valid UTF-8: {}",
+                    self.config.codex_home.display()
+                ),
+            })?;
         let spawn_ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs().to_string())

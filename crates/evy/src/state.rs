@@ -41,10 +41,10 @@ use evy_comms::{
 };
 use evy_core::{Mandate, MandateId, PolicyMode, ProviderKind, WorkerId, WorkerRegistry};
 use evy_memory::ObservationLog;
+use evy_policy::Policy;
 use evy_providers::{
     AccountsStore, ClaudeCodeConfig, ClaudeCodeProvider, CodexConfig, CodexProvider,
 };
-use evy_policy::Policy;
 use evy_scheduler::Scheduler;
 use evy_skills::SkillRegistry;
 use evy_thinking::ThinkingPartner;
@@ -374,14 +374,13 @@ impl AppState for DaemonAppState {
         Ok(true)
     }
 
-    async fn orchestration_captures(
-        &self,
-        lines: usize,
-    ) -> Vec<evy_comms::OrchestrationCapture> {
+    async fn orchestration_captures(&self, lines: usize) -> Vec<evy_comms::OrchestrationCapture> {
         let mut out = Vec::new();
         for r in self.worker_registry.list() {
             let text = match &r.tmux_session {
-                Some(s) => evy_providers::tmux_capture(s, lines).await.unwrap_or_default(),
+                Some(s) => evy_providers::tmux_capture(s, lines)
+                    .await
+                    .unwrap_or_default(),
                 None => String::new(),
             };
             out.push(evy_comms::OrchestrationCapture {

@@ -172,8 +172,8 @@ pub async fn sync_jobs_file(scheduler: &Scheduler, path: &Path) -> SyncSummary {
 fn definition_matches(current: &Job, entry: &JobEntry, action: &JobAction) -> bool {
     // JobAction doesn't impl PartialEq (Mandate payloads); compare the
     // serialized form, which is also what the jobs table stores.
-    let same_action = serde_json::to_value(&current.action).ok()
-        == serde_json::to_value(action).ok();
+    let same_action =
+        serde_json::to_value(&current.action).ok() == serde_json::to_value(action).ok();
     current.cron_expr == entry.cron && current.enabled == entry.enabled && same_action
 }
 

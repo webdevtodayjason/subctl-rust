@@ -269,7 +269,10 @@ fn list_session_jsonls(cfg_dir: &Path) -> Vec<PathBuf> {
     };
     for entry in entries.flatten() {
         let pdir = entry.path();
-        if !std::fs::metadata(&pdir).map(|m| m.is_dir()).unwrap_or(false) {
+        if !std::fs::metadata(&pdir)
+            .map(|m| m.is_dir())
+            .unwrap_or(false)
+        {
             continue;
         }
         if let Ok(files) = std::fs::read_dir(&pdir) {
@@ -425,12 +428,14 @@ pub fn aggregate_account(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let total_tokens = by_model.iter().fold(TokenTotals::default(), |acc, m| TokenTotals {
-        input: acc.input + m.input,
-        output: acc.output + m.output,
-        cache_read: acc.cache_read + m.cache_read,
-        cache_write: acc.cache_write + m.cache_write,
-    });
+    let total_tokens = by_model
+        .iter()
+        .fold(TokenTotals::default(), |acc, m| TokenTotals {
+            input: acc.input + m.input,
+            output: acc.output + m.output,
+            cache_read: acc.cache_read + m.cache_read,
+            cache_write: acc.cache_write + m.cache_write,
+        });
     let total_turns: u64 = by_model.iter().map(|m| m.turns).sum();
     let savings = if window == "month" {
         total_cost - subscription_usd
@@ -468,12 +473,24 @@ pub fn aggregate_all(
     let rows = evy_providers::AccountsStore::open(accounts_conf)
         .and_then(|s| s.list_rows())
         .unwrap_or_default();
-    let claude_rows: Vec<_> = rows.into_iter().filter(|r| r.provider == "claude").collect();
+    let claude_rows: Vec<_> = rows
+        .into_iter()
+        .filter(|r| r.provider == "claude")
+        .collect();
 
     let subscription = pricing.subscription_for("claude");
     let mut result: Vec<AccountCostSummary> = claude_rows
         .iter()
-        .map(|r| aggregate_account(&r.alias, &r.config_dir, window, now_ms, pricing, subscription))
+        .map(|r| {
+            aggregate_account(
+                &r.alias,
+                &r.config_dir,
+                window,
+                now_ms,
+                pricing,
+                subscription,
+            )
+        })
         .collect();
 
     let default_dir = home_dir.join(".claude");
@@ -519,7 +536,11 @@ pub fn build_bundle(
         savings_month_usd: round_dp(sav, 2),
     };
 
-    CostBundle { this_month, this_week, totals }
+    CostBundle {
+        this_month,
+        this_week,
+        totals,
+    }
 }
 
 // ───────────────────────── env paths + cache ─────────────────────────
@@ -647,7 +668,10 @@ mod tests {
         let p = pricing();
         assert_eq!(p.rate_for("claude-opus-4-7").unwrap().input, 5.0);
         // suffixed id matches the prefix stem
-        assert_eq!(p.rate_for("claude-sonnet-4-5-20250929").unwrap().output, 15.0);
+        assert_eq!(
+            p.rate_for("claude-sonnet-4-5-20250929").unwrap().output,
+            15.0
+        );
         // unpriced model → None (cost stays 0)
         assert!(p.rate_for("claude-opus-4-8").is_none());
         assert!(p.rate_for("").is_none());
@@ -670,7 +694,14 @@ mod tests {
             "proj-a",
             "s1",
             &[
-                &turn("claude-opus-4-7", &iso(1000), 1_000_000, 1_000_000, 1_000_000, 1_000_000),
+                &turn(
+                    "claude-opus-4-7",
+                    &iso(1000),
+                    1_000_000,
+                    1_000_000,
+                    1_000_000,
+                    1_000_000,
+                ),
                 // unpriced model — tokens/turns count, cost stays 0
                 &turn("claude-opus-4-8", &iso(2000), 500_000, 0, 0, 0),
             ],
@@ -701,7 +732,7 @@ mod tests {
                 "",
                 "not json at all",
                 r#"{"no":"usage here"}"#,
-                "{ broken json \"usage\"",                       // contains "usage" but unparseable
+                "{ broken json \"usage\"", // contains "usage" but unparseable
                 r#"{"message":{"model":"claude-opus-4-7","usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#, // sum 0 → skip
                 &turn("claude-opus-4-7", &iso(1000), 1_000_000, 0, 0, 0), // counts
             ],
@@ -720,7 +751,9 @@ mod tests {
             &cfg,
             "p",
             "s",
-            &[r#"{"timestamp":"2026-05-30T00:00:00.000Z","model":"claude-haiku-4-5","usage":{"input_tokens":1000000,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}"#],
+            &[
+                r#"{"timestamp":"2026-05-30T00:00:00.000Z","model":"claude-haiku-4-5","usage":{"input_tokens":1000000,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}"#,
+            ],
         );
         let s = aggregate_account("a", &cfg, "month", now(), &pricing(), 200.0);
         assert_eq!(s.by_model.len(), 1);
@@ -738,8 +771,22 @@ mod tests {
             "p",
             "s",
             &[
-                &turn("claude-opus-4-7", &iso(WINDOW_TODAY_MS / 2), 1_000_000, 0, 0, 0),
-                &turn("claude-opus-4-7", &iso(WINDOW_WEEK_MS + WINDOW_TODAY_MS), 9_000_000, 0, 0, 0),
+                &turn(
+                    "claude-opus-4-7",
+                    &iso(WINDOW_TODAY_MS / 2),
+                    1_000_000,
+                    0,
+                    0,
+                    0,
+                ),
+                &turn(
+                    "claude-opus-4-7",
+                    &iso(WINDOW_WEEK_MS + WINDOW_TODAY_MS),
+                    9_000_000,
+                    0,
+                    0,
+                    0,
+                ),
             ],
         );
         let week = aggregate_account("a", &cfg, "week", now(), &pricing(), 200.0);
@@ -789,7 +836,14 @@ mod tests {
             &cfg,
             "p",
             "s",
-            &[&turn("claude-opus-4-7", "2000-01-01T00:00:00.000Z", 1_000_000, 0, 0, 0)],
+            &[&turn(
+                "claude-opus-4-7",
+                "2000-01-01T00:00:00.000Z",
+                1_000_000,
+                0,
+                0,
+                0,
+            )],
         );
         let s = aggregate_account("a", &cfg, "all", now(), &pricing(), 200.0);
         assert_eq!(s.window_start_ms, -1);
@@ -811,12 +865,27 @@ mod tests {
         let jason = root.join("cfg-jason");
         std::fs::create_dir_all(&home).unwrap();
         // configured claude account + a codex account (must be excluded)
-        write_jsonl(&jason, "p", "s", &[&turn("claude-opus-4-7", &iso(1000), 1_000_000, 0, 0, 0)]);
+        write_jsonl(
+            &jason,
+            "p",
+            "s",
+            &[&turn("claude-opus-4-7", &iso(1000), 1_000_000, 0, 0, 0)],
+        );
         let codex = root.join("cfg-codex");
-        write_jsonl(&codex, "p", "s", &[&turn("claude-opus-4-7", &iso(1000), 5_000_000, 0, 0, 0)]);
+        write_jsonl(
+            &codex,
+            "p",
+            "s",
+            &[&turn("claude-opus-4-7", &iso(1000), 5_000_000, 0, 0, 0)],
+        );
         // default ~/.claude bucket (under home) with usage
         let default_dir = home.join(".claude");
-        write_jsonl(&default_dir, "p", "s", &[&turn("claude-haiku-4-5", &iso(1000), 1_000_000, 0, 0, 0)]);
+        write_jsonl(
+            &default_dir,
+            "p",
+            "s",
+            &[&turn("claude-haiku-4-5", &iso(1000), 1_000_000, 0, 0, 0)],
+        );
 
         let conf = write_accounts_conf(
             &root,
@@ -842,7 +911,12 @@ mod tests {
         let home = root.join("home");
         std::fs::create_dir_all(&home).unwrap();
         let default_dir = home.join(".claude");
-        write_jsonl(&default_dir, "p", "s", &[&turn("claude-opus-4-7", &iso(1000), 1_000_000, 0, 0, 0)]);
+        write_jsonl(
+            &default_dir,
+            "p",
+            "s",
+            &[&turn("claude-opus-4-7", &iso(1000), 1_000_000, 0, 0, 0)],
+        );
         // accounts.conf points an account AT ~/.claude → no separate default bucket
         let conf = write_accounts_conf(
             &root,
@@ -861,8 +935,23 @@ mod tests {
         let cfg = root.join("cfg");
         std::fs::create_dir_all(&home).unwrap();
         // 1M of each token type on opus → 36.75 cost; savings 36.75-200 = -163.25
-        write_jsonl(&cfg, "p", "s", &[&turn("claude-opus-4-7", &iso(1000), 1_000_000, 1_000_000, 1_000_000, 1_000_000)]);
-        let conf = write_accounts_conf(&root, &format!("claude-a|claude|a@x.com|{}\n", cfg.display()));
+        write_jsonl(
+            &cfg,
+            "p",
+            "s",
+            &[&turn(
+                "claude-opus-4-7",
+                &iso(1000),
+                1_000_000,
+                1_000_000,
+                1_000_000,
+                1_000_000,
+            )],
+        );
+        let conf = write_accounts_conf(
+            &root,
+            &format!("claude-a|claude|a@x.com|{}\n", cfg.display()),
+        );
         let bundle = build_bundle(now(), &conf, &home, &pricing());
         assert_eq!(bundle.this_month.len(), 1);
         assert_eq!(bundle.totals.api_cost_month_usd, 36.75);

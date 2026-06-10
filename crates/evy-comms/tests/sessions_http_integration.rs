@@ -260,13 +260,21 @@ async fn sessions_master_alias_routes_also_work() {
         .send()
         .await
         .expect("send list");
-    assert_ne!(res.status(), 200, "/api/master/sessions not native post-cutover");
+    assert_ne!(
+        res.status(),
+        200,
+        "/api/master/sessions not native post-cutover"
+    );
 
     let res = reqwest::Client::new()
         .delete(format!("{base}/api/master/sessions/{sid}"))
         .send()
         .await
         .expect("send delete");
-    assert_ne!(res.status(), 204, "/api/master/sessions/:id not native post-cutover");
+    assert_ne!(
+        res.status(),
+        204,
+        "/api/master/sessions/:id not native post-cutover"
+    );
     shutdown.cancel();
 }

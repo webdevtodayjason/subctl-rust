@@ -62,8 +62,8 @@ fn accounts_conf_path() -> PathBuf {
 }
 
 fn history_path() -> PathBuf {
-    let cfg = std::env::var("SUBCTL_CONFIG_DIR")
-        .unwrap_or_else(|_| format!("{}/.config/subctl", home()));
+    let cfg =
+        std::env::var("SUBCTL_CONFIG_DIR").unwrap_or_else(|_| format!("{}/.config/subctl", home()));
     PathBuf::from(cfg).join("cache").join("usage-history.jsonl")
 }
 
@@ -193,7 +193,10 @@ async fn fetch_bun_state() -> Option<serde_json::Value> {
 pub(crate) async fn build_state() -> serde_json::Value {
     let now_ms = chrono::Utc::now().timestamp_millis();
     let accounts = build_account_summaries(now_ms).await;
-    let av: Vec<(String, AccountVerdict)> = accounts.iter().map(AccountSummary::alias_and_verdict).collect();
+    let av: Vec<(String, AccountVerdict)> = accounts
+        .iter()
+        .map(AccountSummary::alias_and_verdict)
+        .collect();
     let dispatch = dispatch_verdict(&av);
     // Cost seam — native CostBundle replaces the v3-proxied `cost` field.
     let cost = crate::cost_http::cost_value(now_ms).await;
@@ -203,8 +206,14 @@ pub(crate) async fn build_state() -> serde_json::Value {
         .filter(serde_json::Value::is_object)
         .unwrap_or_else(|| serde_json::json!({ "ok": true }));
     if let Some(obj) = base.as_object_mut() {
-        obj.insert("accounts".into(), serde_json::to_value(&accounts).unwrap_or(serde_json::Value::Null));
-        obj.insert("dispatch".into(), serde_json::to_value(&dispatch).unwrap_or(serde_json::Value::Null));
+        obj.insert(
+            "accounts".into(),
+            serde_json::to_value(&accounts).unwrap_or(serde_json::Value::Null),
+        );
+        obj.insert(
+            "dispatch".into(),
+            serde_json::to_value(&dispatch).unwrap_or(serde_json::Value::Null),
+        );
         obj.insert("cost".into(), cost);
     }
     base

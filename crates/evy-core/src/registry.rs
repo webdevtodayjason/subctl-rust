@@ -50,7 +50,12 @@ impl WorkerRecord {
     /// Build a freshly-registered `Running` record (the common dispatch case):
     /// `created_at_ms == last_activity_ms == now_ms`, optional fields cleared.
     #[must_use]
-    pub fn running(id: WorkerId, provider: ProviderKind, mandate_id: MandateId, now_ms: i64) -> Self {
+    pub fn running(
+        id: WorkerId,
+        provider: ProviderKind,
+        mandate_id: MandateId,
+        now_ms: i64,
+    ) -> Self {
         Self {
             id,
             provider,
@@ -163,11 +168,15 @@ impl WorkerRegistry {
     fn read(&self) -> std::sync::RwLockReadGuard<'_, HashMap<WorkerId, WorkerRecord>> {
         // Poison only on a panic-while-holding; recover the guard rather than
         // cascading the panic into every reader.
-        self.inner.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn write(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<WorkerId, WorkerRecord>> {
-        self.inner.write().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -176,7 +185,12 @@ mod tests {
     use super::*;
 
     fn rec(now: i64) -> WorkerRecord {
-        WorkerRecord::running(WorkerId::new(), ProviderKind::ClaudeCode, MandateId::new(), now)
+        WorkerRecord::running(
+            WorkerId::new(),
+            ProviderKind::ClaudeCode,
+            MandateId::new(),
+            now,
+        )
     }
 
     #[test]
@@ -244,7 +258,10 @@ mod tests {
         let id = r.id;
         reg.register(r);
         assert!(reg.set_tmux_session(&id, "claude-tmp".into()));
-        assert_eq!(reg.get(&id).unwrap().tmux_session.as_deref(), Some("claude-tmp"));
+        assert_eq!(
+            reg.get(&id).unwrap().tmux_session.as_deref(),
+            Some("claude-tmp")
+        );
         assert!(!reg.set_tmux_session(&WorkerId::new(), "x".into()));
     }
 

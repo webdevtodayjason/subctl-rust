@@ -76,7 +76,9 @@ async fn run_tmux(scope: TmuxScope, args: &[&str]) -> Result<String> {
 /// fails (session gone, tmux error). Trailing blank lines are trimmed.
 pub async fn tmux_capture(session: &str, lines: usize) -> Option<String> {
     let scope = TmuxScope(ProviderKind::ClaudeCode);
-    let out = run_tmux(scope, &["capture-pane", "-p", "-t", session]).await.ok()?;
+    let out = run_tmux(scope, &["capture-pane", "-p", "-t", session])
+        .await
+        .ok()?;
     let trimmed: Vec<&str> = out.lines().collect();
     let end = trimmed
         .iter()

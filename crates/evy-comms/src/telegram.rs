@@ -466,7 +466,10 @@ impl TelegramBridge {
         };
         if let Some(ask_id) = lone_ask {
             self.inner.asks.resolve(ask_id, text.to_string()).await?;
-            debug!(?ask_id, "telegram: resolved lone open ask via plain message");
+            debug!(
+                ?ask_id,
+                "telegram: resolved lone open ask via plain message"
+            );
             return Ok(());
         }
 

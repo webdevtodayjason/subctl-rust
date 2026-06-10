@@ -160,7 +160,10 @@ impl ThinkingPartner {
     async fn write_archive(&self, label: &str, msgs: &[Message]) -> Option<std::path::PathBuf> {
         let dir = self.archive_dir()?;
         tokio::fs::create_dir_all(&dir).await.ok()?;
-        let path = dir.join(format!("{label}-{}.jsonl", chrono::Utc::now().timestamp_millis()));
+        let path = dir.join(format!(
+            "{label}-{}.jsonl",
+            chrono::Utc::now().timestamp_millis()
+        ));
         let mut buf = String::new();
         for m in msgs {
             if let Ok(line) = serde_json::to_string(m) {

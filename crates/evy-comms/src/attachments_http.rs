@@ -128,8 +128,8 @@ fn home() -> String {
 /// Resolve the attachments root: `$SUBCTL_CONFIG_DIR/evy/attachments`
 /// (default `~/.config/subctl`).
 fn attachments_root() -> PathBuf {
-    let cfg = std::env::var("SUBCTL_CONFIG_DIR")
-        .unwrap_or_else(|_| format!("{}/.config/subctl", home()));
+    let cfg =
+        std::env::var("SUBCTL_CONFIG_DIR").unwrap_or_else(|_| format!("{}/.config/subctl", home()));
     PathBuf::from(cfg).join("evy").join("attachments")
 }
 
@@ -309,7 +309,10 @@ fn do_save(
     source: Source,
 ) -> Result<Attachment, SaveError> {
     if body.is_empty() {
-        return Err(SaveError { error: "empty body".into(), hint: None });
+        return Err(SaveError {
+            error: "empty body".into(),
+            hint: None,
+        });
     }
     if body.len() > MAX_BYTES {
         return Err(SaveError {
@@ -320,7 +323,11 @@ fn do_save(
             ),
         });
     }
-    let filename = sanitize_filename(if raw_filename.is_empty() { "untitled.txt" } else { raw_filename });
+    let filename = sanitize_filename(if raw_filename.is_empty() {
+        "untitled.txt"
+    } else {
+        raw_filename
+    });
     let mime = infer_mime(&filename, mime_hint);
     if !is_allowed_mime(&mime) {
         return Err(SaveError {
@@ -334,13 +341,17 @@ fn do_save(
 
     let date_dir = today_dir();
     let dir = root.join(&date_dir);
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| SaveError { error: format!("mkdir: {e}"), hint: None })?;
+    std::fs::create_dir_all(&dir).map_err(|e| SaveError {
+        error: format!("mkdir: {e}"),
+        hint: None,
+    })?;
 
     let id = make_id();
     let storage_path = dir.join(format!("{id}-{filename}"));
-    std::fs::write(&storage_path, body)
-        .map_err(|e| SaveError { error: format!("write: {e}"), hint: None })?;
+    std::fs::write(&storage_path, body).map_err(|e| SaveError {
+        error: format!("write: {e}"),
+        hint: None,
+    })?;
     let sha256 = hex::encode(sha2::Sha256::digest(body));
     let entry = Attachment {
         id,
@@ -353,8 +364,10 @@ fn do_save(
         deleted_at: None,
         storage_path: storage_path.to_string_lossy().into_owned(),
     };
-    append_index(root, &entry)
-        .map_err(|e| SaveError { error: format!("index: {e}"), hint: None })?;
+    append_index(root, &entry).map_err(|e| SaveError {
+        error: format!("index: {e}"),
+        hint: None,
+    })?;
     Ok(entry)
 }
 
@@ -362,7 +375,10 @@ fn do_save(
 /// `Err(msg)` (→ 404) when no live attachment with that id exists.
 fn do_delete(root: &Path, id: &str) -> Result<(), String> {
     let mut all = read_index(root);
-    let Some(idx) = all.iter().position(|e| e.id == id && e.deleted_at.is_none()) else {
+    let Some(idx) = all
+        .iter()
+        .position(|e| e.id == id && e.deleted_at.is_none())
+    else {
         return Err(format!("no attachment with id={id}"));
     };
     all[idx].deleted_at = Some(now_iso());
@@ -383,7 +399,12 @@ pub(crate) async fn upload_handler(headers: HeaderMap, body: Body) -> Response {
     // Browser sends X-Filename url-encoded; fall back to raw on malformed.
     let filename = decode_uri_component(raw_filename).unwrap_or_else(|| raw_filename.to_string());
     let mime_hint = headers.get("X-Mime").and_then(|v| v.to_str().ok());
-    let source = Source::parse(headers.get("X-Source").and_then(|v| v.to_str().ok()).unwrap_or("upload"));
+    let source = Source::parse(
+        headers
+            .get("X-Source")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("upload"),
+    );
 
     let bytes = match axum::body::to_bytes(body, BODY_READ_LIMIT).await {
         Ok(b) => b,
@@ -424,7 +445,11 @@ pub(crate) async fn upload_handler(headers: HeaderMap, body: Body) -> Response {
             if let Some(hint) = e.hint {
                 obj.insert("hint".into(), json!(hint));
             }
-            (StatusCode::BAD_REQUEST, Json(serde_json::Value::Object(obj))).into_response()
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::Value::Object(obj)),
+            )
+                .into_response()
         }
     }
 }
@@ -449,7 +474,9 @@ pub(crate) async fn list_handler() -> Response {
 }
 
 fn created_ms(iso: &str) -> i64 {
-    DateTime::parse_from_rfc3339(iso).map(|d| d.timestamp_millis()).unwrap_or(0)
+    DateTime::parse_from_rfc3339(iso)
+        .map(|d| d.timestamp_millis())
+        .unwrap_or(0)
 }
 
 /// `GET /api/evy/attachments/{id}` — stream the stored bytes back with the
@@ -499,12 +526,20 @@ pub(crate) async fn delete_handler(AxPath(id): AxPath<String>) -> Response {
     }
     match do_delete(&attachments_root(), &id) {
         Ok(()) => Json(json!({ "ok": true })).into_response(),
-        Err(error) => (StatusCode::NOT_FOUND, Json(json!({ "ok": false, "error": error }))).into_response(),
+        Err(error) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "ok": false, "error": error })),
+        )
+            .into_response(),
     }
 }
 
 fn not_found() -> Response {
-    (StatusCode::NOT_FOUND, Json(json!({ "ok": false, "error": "not found" }))).into_response()
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({ "ok": false, "error": "not found" })),
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -545,7 +580,12 @@ mod tests {
     #[test]
     fn rejects_empty_oversize_and_bad_mime() {
         let root = tmpdir();
-        assert_eq!(do_save(&root, b"", "x.txt", None, Source::Upload).unwrap_err().error, "empty body");
+        assert_eq!(
+            do_save(&root, b"", "x.txt", None, Source::Upload)
+                .unwrap_err()
+                .error,
+            "empty body"
+        );
 
         let big = vec![b'a'; MAX_BYTES + 1];
         let err = do_save(&root, &big, "big.txt", None, Source::Upload).unwrap_err();
@@ -554,7 +594,14 @@ mod tests {
 
         // .png infers nothing in the text map → text/plain, BUT an explicit
         // disallowed X-Mime is rejected.
-        let err = do_save(&root, b"\x89PNG", "logo.png", Some("image/png"), Source::Upload).unwrap_err();
+        let err = do_save(
+            &root,
+            b"\x89PNG",
+            "logo.png",
+            Some("image/png"),
+            Source::Upload,
+        )
+        .unwrap_err();
         assert_eq!(err.error, "mime type not allowed: image/png");
         assert!(err.hint.is_some());
     }
@@ -597,7 +644,10 @@ mod tests {
 
     #[test]
     fn decode_uri_component_handles_utf8_and_malformed() {
-        assert_eq!(decode_uri_component("foo%20bar.txt").unwrap(), "foo bar.txt");
+        assert_eq!(
+            decode_uri_component("foo%20bar.txt").unwrap(),
+            "foo bar.txt"
+        );
         // %E2%80%A6 = "…"
         assert_eq!(decode_uri_component("a%E2%80%A6.md").unwrap(), "a….md");
         // Malformed escape → None (caller falls back to raw).

@@ -55,7 +55,11 @@ fn do_list(dir: &Path) -> Value {
             let Ok(mut val) = serde_json::from_str::<Value>(&text) else {
                 continue; // skip bad JSON, like v3
             };
-            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
             if let Some(obj) = val.as_object_mut() {
                 obj.entry("name").or_insert(json!(stem));
             }
@@ -63,7 +67,9 @@ fn do_list(dir: &Path) -> Value {
         }
     }
     teams.sort_by(|a, b| {
-        a.get("name").and_then(Value::as_str).unwrap_or("")
+        a.get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
             .cmp(b.get("name").and_then(Value::as_str).unwrap_or(""))
     });
     json!({ "ok": true, "teams_dir": dir.to_string_lossy(), "teams": teams })
@@ -86,7 +92,8 @@ fn do_put(dir: &Path, name: &str, body: &Value) -> CrudResult {
     if !safe_name(name) {
         return Err((StatusCode::BAD_REQUEST, "invalid template name".into()));
     }
-    std::fs::create_dir_all(dir).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("mkdir: {e}")))?;
+    std::fs::create_dir_all(dir)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("mkdir: {e}")))?;
     let file = dir.join(format!("{name}.json"));
     let pretty = serde_json::to_string_pretty(body).unwrap_or_else(|_| body.to_string());
     std::fs::write(&file, pretty)
@@ -125,7 +132,10 @@ pub(crate) async fn team_get_handler(AxPath(name): AxPath<String>) -> Response {
 }
 
 /// `PUT /api/evy/teams/{name}` — upsert the template (pretty-printed JSON).
-pub(crate) async fn team_put_handler(AxPath(name): AxPath<String>, Json(body): Json<Value>) -> Response {
+pub(crate) async fn team_put_handler(
+    AxPath(name): AxPath<String>,
+    Json(body): Json<Value>,
+) -> Response {
     resp(do_put(&teams_dir(), &name, &body))
 }
 
@@ -138,7 +148,10 @@ pub(crate) async fn team_delete_handler(AxPath(name): AxPath<String>) -> Respons
 pub(crate) async fn team_post_handler(Json(body): Json<Value>) -> Response {
     match body.get("name").and_then(Value::as_str) {
         Some(name) => resp(do_put(&teams_dir(), name, &body)),
-        None => resp(Err((StatusCode::BAD_REQUEST, "body must include a string `name`".into()))),
+        None => resp(Err((
+            StatusCode::BAD_REQUEST,
+            "body must include a string `name`".into(),
+        ))),
     }
 }
 
@@ -173,8 +186,12 @@ mod tests {
         let dir = tmpdir();
         do_put(&dir, "alpha", &json!({ "x": 1 })).unwrap();
         let list = do_list(&dir);
-        let names: Vec<&str> = list["teams"].as_array().unwrap().iter()
-            .filter_map(|t| t["name"].as_str()).collect();
+        let names: Vec<&str> = list["teams"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
         assert_eq!(names, vec!["alpha"]);
     }
 
@@ -190,7 +207,13 @@ mod tests {
     #[test]
     fn rejects_path_traversal() {
         let dir = tmpdir();
-        assert_eq!(do_get(&dir, "../../etc/passwd").unwrap_err().0, StatusCode::BAD_REQUEST);
-        assert_eq!(do_put(&dir, "a/b", &json!({})).unwrap_err().0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            do_get(&dir, "../../etc/passwd").unwrap_err().0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            do_put(&dir, "a/b", &json!({})).unwrap_err().0,
+            StatusCode::BAD_REQUEST
+        );
     }
 }

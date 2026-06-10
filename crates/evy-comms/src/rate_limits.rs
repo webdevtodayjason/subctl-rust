@@ -95,7 +95,10 @@ pub struct RlAccount {
 
 impl Default for RlAccount {
     fn default() -> Self {
-        Self { count_today: 0, buckets_24h: vec![0; 24] }
+        Self {
+            count_today: 0,
+            buckets_24h: vec![0; 24],
+        }
     }
 }
 
@@ -124,14 +127,20 @@ pub fn today_date_str() -> String {
 /// `recent_429_count` (429s with age ≤ 2h).
 #[must_use]
 pub fn build_rate_limits(rl_log: &Path, aliases: &[String], now_ms: i64, today: &str) -> RlData {
-    let mut by_account: HashMap<String, RlAccount> =
-        aliases.iter().map(|a| (a.clone(), RlAccount::default())).collect();
+    let mut by_account: HashMap<String, RlAccount> = aliases
+        .iter()
+        .map(|a| (a.clone(), RlAccount::default()))
+        .collect();
     let mut today_total = 0u32;
     let mut recent_429 = 0u32;
     let current_hour_ms = now_ms.div_euclid(HOUR_MS) * HOUR_MS;
 
     let Ok(raw) = std::fs::read_to_string(rl_log) else {
-        return RlData { today_total: 0, recent_429_count: 0, by_account };
+        return RlData {
+            today_total: 0,
+            recent_429_count: 0,
+            by_account,
+        };
     };
     for line in raw.lines() {
         let t = line.trim();
@@ -186,7 +195,11 @@ pub fn build_rate_limits(rl_log: &Path, aliases: &[String], now_ms: i64, today: 
             }
         }
     }
-    RlData { today_total, recent_429_count: recent_429, by_account }
+    RlData {
+        today_total,
+        recent_429_count: recent_429,
+        by_account,
+    }
 }
 
 #[cfg(test)]
@@ -231,7 +244,10 @@ mod tests {
     #[test]
     fn usage_history_drops_older_than_24h() {
         let now: i64 = 100 * DAY_MS;
-        let lines = format!("{}\n", serde_json::json!({"ts": now - 25*HOUR_MS, "alias":"a", "five_hour": 1.0}));
+        let lines = format!(
+            "{}\n",
+            serde_json::json!({"ts": now - 25*HOUR_MS, "alias":"a", "five_hour": 1.0})
+        );
         let f = tmpfile(&lines);
         assert!(read_usage_history_24h(&f, now).is_empty());
         let _ = std::fs::remove_file(&f);
@@ -242,7 +258,9 @@ mod tests {
         let now: i64 = 100 * DAY_MS;
         let today = "2099-01-01";
         // ts within 2h (recent 429), today's date; plus a 529 (not a 429)
-        let ts_recent = chrono::DateTime::from_timestamp_millis(now - HOUR_MS).unwrap().to_rfc3339();
+        let ts_recent = chrono::DateTime::from_timestamp_millis(now - HOUR_MS)
+            .unwrap()
+            .to_rfc3339();
         let lines = format!(
             "{}\n{}\n",
             serde_json::json!({"ts": ts_recent, "date": today, "account":"claude-jason", "type":"429 (rate_limit)"}),
@@ -261,7 +279,12 @@ mod tests {
 
     #[test]
     fn rate_limits_empty_when_no_log() {
-        let rl = build_rate_limits(Path::new("/nonexistent/rl.log"), &["a".to_string()], 0, "2099-01-01");
+        let rl = build_rate_limits(
+            Path::new("/nonexistent/rl.log"),
+            &["a".to_string()],
+            0,
+            "2099-01-01",
+        );
         assert_eq!(rl.today_total, 0);
         assert_eq!(rl.by_account["a"].buckets_24h.len(), 24);
     }
