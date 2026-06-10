@@ -95,6 +95,8 @@ pub mod accounts_http;
 pub mod teams_http;
 // ── Cutover — native settings/auth-status/update-status read surface ──
 pub mod preferences_http;
+// ── Cutover: native projects CRUD + policy-preset surface ──
+pub mod projects_http;
 
 // ── Public re-exports — the surface the daemon binary consumes ───────
 
