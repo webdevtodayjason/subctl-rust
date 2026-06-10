@@ -42,13 +42,13 @@ use evy_scheduler::{JobAction, JobId};
 use evy_skills::SkillRegistry;
 use evy_thinking::{SessionId, ThinkingPartner};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
+use uuid::Uuid;
 
 use crate::config::HttpConfig;
 use crate::error::{CommsError, Result};

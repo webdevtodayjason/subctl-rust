@@ -44,7 +44,9 @@ impl LlmBackend for ScriptedBackend {
     async fn respond(&self, _system_prompt: &str, _messages: &[Message]) -> ThinkingResult<String> {
         let mut q = self.replies.lock().unwrap();
         if q.is_empty() {
-            Err(ThinkingError::BackendRefused("scripted backend ran out".into()))
+            Err(ThinkingError::BackendRefused(
+                "scripted backend ran out".into(),
+            ))
         } else {
             Ok(q.remove(0))
         }
@@ -261,7 +263,11 @@ async fn clear_resets_the_current_session_so_next_transcript_is_empty() {
         .await
         .expect("transcript json");
     assert_eq!(tr["ok"], true);
-    assert_eq!(tr["total"].as_u64().unwrap_or(999), 0, "clear must reset to a fresh chat");
+    assert_eq!(
+        tr["total"].as_u64().unwrap_or(999),
+        0,
+        "clear must reset to a fresh chat"
+    );
 
     shutdown.cancel();
 }
