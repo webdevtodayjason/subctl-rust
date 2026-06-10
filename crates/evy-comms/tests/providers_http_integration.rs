@@ -1,14 +1,16 @@
 //! End-to-end tests for the v4-native providers/models/catalogs family
-//! (W1). Spins up a real axum server on an ephemeral port, drives it with
-//! `reqwest`, and asserts the v3 wire shape — the contract the dashboard
-//! sees.
+//! (W1) — the endpoints v4 serves natively: `/api/models`,
+//! `/api/models/refresh`, and `/api/providers/profiles` (POST/DELETE).
+//! `/api/providers` and `/api/catalogs` stay on the v3 reverse-proxy and
+//! are not exercised here.
 //!
-//! These handlers read process-global env (`SUBCTL_CONFIG_DIR`,
-//! `SUBCTL_LMSTUDIO_HOST`, `SUBCTL_ACCOUNTS_CONF`), so every test that
-//! depends on them holds a shared async lock and points them at hermetic
-//! temp paths / a closed port. LM Studio is never reachable in these tests
-//! (host → `127.0.0.1:1`), exercising the `unreachable` / empty-catalog
-//! paths deterministically.
+//! Spins up a real axum server on an ephemeral port, drives it with
+//! `reqwest`, and asserts the v3 wire shape. These handlers read
+//! process-global env (`SUBCTL_CONFIG_DIR`, `SUBCTL_LMSTUDIO_HOST`,
+//! `SUBCTL_ACCOUNTS_CONF`), so every test holds a shared async lock and
+//! points them at hermetic temp paths / a closed port. LM Studio is never
+//! reachable here (host → `127.0.0.1:1`), exercising the `unreachable`
+//! path deterministically.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -50,8 +52,8 @@ async fn spawn(state: Arc<dyn AppState>) -> (String, CancellationToken) {
     (format!("http://{addr}"), shutdown)
 }
 
-/// AppState whose `provider_catalog()` returns wired pi-ai data, so the
-/// catalog-derived branches are exercised.
+/// AppState whose `provider_catalog()` returns a wired pi-ai id set, so the
+/// profile write-gate runs in strict mode.
 struct CatalogState(ProviderCatalogData);
 
 #[async_trait]
@@ -107,89 +109,26 @@ async fn models_refresh_unreachable_returns_502() {
 }
 
 #[tokio::test]
-async fn providers_empty_catalog_returns_shape_with_array() {
+async fn providers_and_catalogs_are_not_served_natively() {
+    // These stay on the v3 reverse-proxy catch-all. Point the proxy upstream
+    // at a closed port: a proxied route then yields 502 (bad gateway), while
+    // a natively-handled route would return 200 regardless of the upstream.
+    // So 502 here proves they fall through to the proxy.
     let _env = lock_env().await;
-    std::env::set_var("SUBCTL_LMSTUDIO_HOST", CLOSED_LM_HOST);
     let dir = tempfile::tempdir().unwrap();
     std::env::set_var("SUBCTL_CONFIG_DIR", dir.path());
+    std::env::set_var("EVY_PROXY_UPSTREAM", "127.0.0.1:1");
 
     let (base, shutdown) = spawn(Arc::new(StubAppState)).await;
-    let res = reqwest::get(format!("{base}/api/providers")).await.unwrap();
-    assert_eq!(res.status(), 200);
-    let body: Value = res.json().await.unwrap();
-    assert_eq!(body["ok"], true);
-    // LM Studio unreachable + stub catalog → empty list, correct shape.
-    assert!(body["providers"].is_array());
-    assert_eq!(body["providers"].as_array().unwrap().len(), 0);
-    shutdown.cancel();
-}
-
-#[tokio::test]
-async fn providers_with_wired_catalog_includes_cloud_rows() {
-    let _env = lock_env().await;
-    std::env::set_var("SUBCTL_LMSTUDIO_HOST", CLOSED_LM_HOST);
-    let dir = tempfile::tempdir().unwrap();
-    std::env::set_var("SUBCTL_CONFIG_DIR", dir.path());
-
-    let data = ProviderCatalogData {
-        provider_entries: vec![json!({ "id": "anthropic", "display": "Anthropic Claude", "kind": "cloud" })],
-        uncached: vec![json!({ "provider": "groq", "cached": false, "models_in_bundle": 18 })],
-        provider_ids: HashSet::from(["anthropic".to_string()]),
-    };
-    let (base, shutdown) = spawn(Arc::new(CatalogState(data))).await;
-
-    let body: Value = reqwest::get(format!("{base}/api/providers"))
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let ids: Vec<&str> = body["providers"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|p| p["id"].as_str())
-        .collect();
-    assert!(ids.contains(&"anthropic"), "cloud row surfaced: {ids:?}");
-    shutdown.cancel();
-}
-
-#[tokio::test]
-async fn catalogs_returns_cached_and_uncached_arrays() {
-    let _env = lock_env().await;
-    let dir = tempfile::tempdir().unwrap();
-    std::env::set_var("SUBCTL_CONFIG_DIR", dir.path());
-    // Seed one on-disk catalog cache file.
-    let cat_dir = dir.path().join("catalogs");
-    std::fs::create_dir_all(&cat_dir).unwrap();
-    std::fs::write(
-        cat_dir.join("openai.json"),
-        json!({ "provider": "openai", "source": "live-fetch", "fetched_at": "t", "models": [{}, {}] })
-            .to_string(),
-    )
-    .unwrap();
-
-    let data = ProviderCatalogData {
-        provider_entries: vec![],
-        uncached: vec![json!({ "provider": "groq", "cached": false, "models_in_bundle": 18 })],
-        provider_ids: HashSet::new(),
-    };
-    let (base, shutdown) = spawn(Arc::new(CatalogState(data))).await;
-
-    let body: Value = reqwest::get(format!("{base}/api/catalogs"))
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(body["ok"], true);
-    let cached = body["cached"].as_array().unwrap();
-    assert_eq!(cached.len(), 1);
-    assert_eq!(cached[0]["provider"], "openai");
-    assert_eq!(cached[0]["model_count"], 2);
-    let uncached = body["uncached"].as_array().unwrap();
-    assert_eq!(uncached.len(), 1);
-    assert_eq!(uncached[0]["provider"], "groq");
+    for path in ["/api/providers", "/api/catalogs"] {
+        let res = reqwest::get(format!("{base}{path}")).await.unwrap();
+        assert_eq!(
+            res.status(),
+            502,
+            "{path} must fall through to the (now-dead) proxy, not be served natively"
+        );
+    }
+    std::env::remove_var("EVY_PROXY_UPSTREAM");
     shutdown.cancel();
 }
 
@@ -201,12 +140,10 @@ async fn profiles_post_then_delete_round_trip() {
     std::env::set_var("SUBCTL_ACCOUNTS_CONF", &conf);
 
     let client = reqwest::Client::new();
-    // Add a profile.
+    // Add a profile (StubAppState → write-gate None → permissive).
+    let (base, shutdown) = spawn(Arc::new(StubAppState)).await;
     let add = client
-        .post(format!(
-            "{}/api/providers/profiles",
-            spawn(Arc::new(StubAppState)).await.0
-        ))
+        .post(format!("{base}/api/providers/profiles"))
         .json(&json!({
             "alias": "claude-it", "provider": "anthropic",
             "email": "it@test.com", "config_dir": "~/.claude-it"
@@ -221,7 +158,6 @@ async fn profiles_post_then_delete_round_trip() {
     assert!(conf.exists(), "accounts.conf written");
 
     // Delete it.
-    let (base, shutdown) = spawn(Arc::new(StubAppState)).await;
     let del = client
         .request(reqwest::Method::DELETE, format!("{base}/api/providers/profiles"))
         .json(&json!({ "alias": "claude-it" }))
@@ -232,6 +168,30 @@ async fn profiles_post_then_delete_round_trip() {
     let body: Value = del.json().await.unwrap();
     assert_eq!(body["ok"], true);
     assert_eq!(body["alias"], "claude-it");
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn profiles_post_unknown_provider_400_when_catalog_wired() {
+    // With a wired catalog id set, the write-gate runs in strict mode and
+    // rejects providers not in the set (exercises provider_catalog() Some).
+    let _env = lock_env().await;
+    let dir = tempfile::tempdir().unwrap();
+    std::env::set_var("SUBCTL_ACCOUNTS_CONF", dir.path().join("accounts.conf"));
+
+    let data = ProviderCatalogData {
+        provider_ids: HashSet::from(["anthropic".to_string()]),
+    };
+    let (base, shutdown) = spawn(Arc::new(CatalogState(data))).await;
+    let res = reqwest::Client::new()
+        .post(format!("{base}/api/providers/profiles"))
+        .json(&json!({ "alias": "x", "provider": "nope", "email": "e", "config_dir": "d" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 400);
+    let body: Value = res.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("pi-ai catalog"));
     shutdown.cancel();
 }
 

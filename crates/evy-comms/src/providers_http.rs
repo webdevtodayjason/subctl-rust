@@ -1,45 +1,37 @@
-//! v4-parity sprint (W1) — providers / models / catalogs family (native).
+//! v4-parity sprint (W1) — providers / models / catalogs family.
 //!
-//! Ports the v3 Bun dashboard's provider-config + model-catalog read/poll
-//! surface (`dashboard/server.ts`) to v4-native Rust:
+//! **Native (v4 owns the data):**
 //!
 //! | Method | Path | v3 source |
 //! |--------|------|-----------|
 //! | GET    | `/api/models`              | LM Studio `/api/v0/models` (30s cache) |
 //! | POST   | `/api/models/refresh`      | same, force-busting the cache |
-//! | GET    | `/api/providers`           | LM Studio entry + pi-ai cloud catalog |
-//! | GET    | `/api/catalogs`            | on-disk per-provider catalog cache + pi-ai bundle |
 //! | POST   | `/api/providers/profiles`  | add/edit an `accounts.conf` row |
 //! | DELETE | `/api/providers/profiles`  | remove an `accounts.conf` row |
 //!
-//! # What is native vs. daemon-sourced
+//! **Stays on the v3 reverse-proxy (pi-ai owns the data):**
+//! `GET /api/providers`, `GET /api/catalogs`, and every per-provider
+//! catalog sub-endpoint (`/api/catalogs/{p}`, `…/refresh`, model
+//! enable/disable, `/api/providers/{p}/default-model`).
 //!
-//! Three data sources are reproduced faithfully and self-contained here:
+//! Those list endpoints are driven by the **pi-ai catalog**
+//! (`@earendil-works/pi-ai` via `components/evy/pi-ai-catalog.ts`), which
+//! has no Rust equivalent — porting it is a named non-goal (V4_BRIDGE.md).
+//! Serving them natively today would drop the cloud-provider rows the
+//! Providers panel shows, a user-visible regression, so they fall through
+//! the `/api/{*rest}` catch-all to the v3 Bun dashboard unchanged. The
+//! boundary is: native where v4 owns the data, proxied where pi-ai owns it.
 //!
-//! - **LM Studio** — `/api/models`, `/api/models/refresh`, and the live
-//!   `lmstudio` row in `/api/providers` fetch LM Studio's native
-//!   `/api/v0/models` endpoint through a 30-second, host-keyed,
-//!   success-only response cache (mirrors v3's `getLmstudioModels`).
-//! - **On-disk catalog cache** — `/api/catalogs`'s `cached[]` reads the
-//!   operator's `~/.config/subctl/catalogs/*.json` files directly.
-//! - **`accounts.conf`** — the profile CRUD reads/writes the same
-//!   pipe-delimited rows v3 writes, byte-for-byte (column padding).
+//! # LM Studio cache + accounts.conf
 //!
-//! The remaining v3 data — the **pi-ai catalog** (`@earendil-works/pi-ai`
-//! via `components/evy/pi-ai-catalog.ts`) that enumerates every cloud
-//! provider and its bundled model list — has **no Rust equivalent** in the
-//! workspace, and porting it is an explicit non-goal (V4_BRIDGE.md: "No
-//! wholesale port of `components/evy` into Rust"). It is therefore exposed
-//! through a single default-`None` [`AppState::provider_catalog`] hook:
-//! the daemon supplies [`ProviderCatalogData`] once it surfaces the
-//! registry; until then the catalog-derived arrays render empty while the
-//! native data above still serves. Handlers always return 200 + the v3
-//! wire **shape**.
-//!
-//! The per-provider mutation sub-endpoints (`/api/catalogs/{provider}`,
-//! `…/refresh`, model enable/disable, `/api/providers/{provider}/default-model`)
-//! are pure pi-ai machinery and intentionally fall through to the v3
-//! reverse-proxy catch-all — a clean strangler boundary.
+//! `/api/models` and `/api/models/refresh` fetch LM Studio's native
+//! `/api/v0/models` endpoint through a 30-second, host-keyed, success-only
+//! response cache (mirrors v3's `getLmstudioModels`). The profile CRUD
+//! reads/writes the same pipe-delimited `accounts.conf` rows v3 writes,
+//! byte-for-byte (column padding) — minus the pi-ai `isCatalogProvider`
+//! write-gate, which is enforced only when the daemon supplies the catalog
+//! id set via [`AppState::provider_catalog`](crate::AppState::provider_catalog)
+//! and is permissive (skipped) when absent.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -57,30 +49,21 @@ use crate::http::HttpState;
 
 // ─── daemon-sourced pi-ai catalog hook ─────────────────────────────────
 
-/// pi-ai-catalog-derived data for the providers/catalogs family.
+/// pi-ai-catalog data the daemon supplies to the providers family.
 ///
 /// Returned (as `Some`) by [`AppState::provider_catalog`](crate::AppState::provider_catalog)
-/// once the daemon wires the `@earendil-works/pi-ai` registry. The default
-/// implementation returns `None`, in which case the catalog-derived arrays
-/// in `/api/providers` and `/api/catalogs` render empty and the profile
-/// write-gate is permissive — the LM Studio, on-disk-catalog, and
-/// `accounts.conf` data is still served natively.
+/// once the daemon surfaces the `@earendil-works/pi-ai` registry. The only
+/// native consumer today is the `POST /api/providers/profiles` write-gate,
+/// so the struct carries the accepted provider-id set; the list endpoints
+/// that would need the rest of the registry stay on the v3 proxy. Future
+/// native migration of those endpoints would extend this struct — it is the
+/// designated wiring point.
 #[derive(Debug, Clone, Default)]
 pub struct ProviderCatalogData {
-    /// Pre-built cloud-provider rows appended after the live `lmstudio`
-    /// entry in `GET /api/providers` (each already in the v3 wire shape:
-    /// `id`, `display`, `kind`, `auth_method`, `model_count`,
-    /// `enabled_models`, `profiles`, …).
-    pub provider_entries: Vec<Value>,
-    /// Pre-built `uncached[]` rows for `GET /api/catalogs` — the pi-ai
-    /// providers that have no on-disk cache yet
-    /// (`{provider, cached:false, models_in_bundle}`).
-    pub uncached: Vec<Value>,
-    /// Canonical pi-ai provider ids accepted by
-    /// `POST /api/providers/profiles`. When present, a write whose
-    /// `provider` is not in this set is rejected with 400 (mirrors v3's
-    /// `isCatalogProvider` write-gate); when the whole struct is `None`
-    /// the gate is skipped.
+    /// Canonical pi-ai provider ids accepted by `POST /api/providers/profiles`.
+    /// When present, a write whose `provider` is not in this set is rejected
+    /// 400 (mirrors v3's `isCatalogProvider`); when the whole struct is
+    /// `None` the gate is skipped (permissive).
     pub provider_ids: HashSet<String>,
 }
 
@@ -95,11 +78,6 @@ fn config_dir() -> PathBuf {
     std::env::var("SUBCTL_CONFIG_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(format!("{}/.config/subctl", home())))
-}
-
-/// `<config>/catalogs/` — per-provider catalog cache files (v3 `catalogsDir`).
-fn catalogs_dir() -> PathBuf {
-    config_dir().join("catalogs")
 }
 
 /// `<config>/secrets.json` — dashboard-managed secret store.
@@ -229,7 +207,7 @@ async fn get_lmstudio_models(host: &str, force: bool) -> Result<Vec<Value>, LmEr
     Ok(data)
 }
 
-// ─── response builders ──────────────────────────────────────────────────
+// ─── /api/models response builders ──────────────────────────────────────
 
 /// ISO-8601 timestamp with millisecond precision + `Z` (matches JS
 /// `new Date().toISOString()`).
@@ -328,97 +306,6 @@ fn lm_error_response(err: LmError, host: &str, has_token: bool, refresh: bool) -
         }
     };
     (status, Json(body)).into_response()
-}
-
-/// Build the live `lmstudio` provider row for `/api/providers` from a raw
-/// LM Studio `data` array (only `vlm`/`llm` model types are surfaced).
-fn lmstudio_provider_entry(host: &str, data: &[Value]) -> Value {
-    let models: Vec<Value> = data
-        .iter()
-        .filter(|m| matches!(m.get("type").and_then(Value::as_str), Some("vlm" | "llm")))
-        .map(|m| {
-            let state = m.get("state").cloned().unwrap_or(Value::Null);
-            let loaded = state.as_str() == Some("loaded");
-            let mut obj = serde_json::Map::new();
-            obj.insert("id".into(), m.get("id").cloned().unwrap_or(Value::Null));
-            obj.insert("state".into(), state);
-            obj.insert("loaded".into(), json!(loaded));
-            // `undefined` fields are omitted by v3's JSON.stringify — mirror
-            // by only inserting keys the source actually carries.
-            if let Some(q) = m.get("quantization") {
-                obj.insert("quantization".into(), q.clone());
-            }
-            if let Some(lcl) = m.get("loaded_context_length") {
-                obj.insert("loaded_context_length".into(), lcl.clone());
-            }
-            if let Some(mcl) = m.get("max_context_length") {
-                obj.insert("max_context_length".into(), mcl.clone());
-            }
-            obj.insert(
-                "capabilities".into(),
-                m.get("capabilities").cloned().unwrap_or_else(|| json!([])),
-            );
-            Value::Object(obj)
-        })
-        .collect();
-    json!({
-        "id": "lmstudio",
-        "display": "LM Studio (local)",
-        "kind": "local",
-        "host": host,
-        "available": true,
-        "note": "Always-on local inference. Per-model availability depends on LM Studio's loaded state.",
-        "models": models,
-    })
-}
-
-// ─── on-disk catalog cache (/api/catalogs `cached[]`) ───────────────────
-
-/// Enumerate the on-disk per-provider catalog cache (`<config>/catalogs/*.json`),
-/// projecting each valid file to the `/api/catalogs` `cached[]` shape. A
-/// file is valid iff it parses and carries a non-empty `provider` plus a
-/// `models` array (mirrors v3's `loadCatalog`); invalid files are skipped.
-/// Sorted by provider for deterministic output (v3 is `readdir` order).
-fn do_list_catalogs(dir: &Path) -> Vec<Value> {
-    let mut out: Vec<(String, Value)> = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|x| x.to_str()) != Some("json") {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(val) = serde_json::from_str::<Value>(&text) else {
-            continue;
-        };
-        let provider = match val.get("provider").and_then(Value::as_str) {
-            Some(p) if !p.is_empty() => p.to_string(),
-            _ => continue,
-        };
-        let Some(models) = val.get("models").and_then(Value::as_array) else {
-            continue;
-        };
-        let mut obj = serde_json::Map::new();
-        obj.insert("provider".into(), json!(provider));
-        if let Some(source) = val.get("source") {
-            obj.insert("source".into(), source.clone());
-        }
-        if let Some(fetched_at) = val.get("fetched_at") {
-            obj.insert("fetched_at".into(), fetched_at.clone());
-        }
-        obj.insert("model_count".into(), json!(models.len()));
-        obj.insert(
-            "source_url".into(),
-            val.get("source_url").cloned().unwrap_or(Value::Null),
-        );
-        out.push((provider, Value::Object(obj)));
-    }
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    out.into_iter().map(|(_, v)| v).collect()
 }
 
 // ─── accounts.conf profile CRUD ─────────────────────────────────────────
@@ -606,33 +493,6 @@ pub(crate) async fn models_refresh_handler() -> Response {
     }
 }
 
-/// `GET /api/providers` — local-first provider catalog: the live `lmstudio`
-/// row (when reachable) followed by the daemon-supplied pi-ai cloud rows.
-pub(crate) async fn providers_handler(State(state): State<HttpState>) -> Json<Value> {
-    let host = lm_host();
-    let mut providers: Vec<Value> = Vec::new();
-    if let Ok(data) = get_lmstudio_models(&host, false).await {
-        providers.push(lmstudio_provider_entry(&host, &data));
-    }
-    if let Some(cat) = state.app.provider_catalog() {
-        providers.extend(cat.provider_entries);
-    }
-    Json(json!({ "ok": true, "providers": providers }))
-}
-
-/// `GET /api/catalogs` — on-disk per-provider catalog cache (`cached[]`)
-/// plus the daemon-supplied pi-ai bundle providers without a cache yet
-/// (`uncached[]`).
-pub(crate) async fn catalogs_handler(State(state): State<HttpState>) -> Json<Value> {
-    let cached = do_list_catalogs(&catalogs_dir());
-    let uncached = state
-        .app
-        .provider_catalog()
-        .map(|c| c.uncached)
-        .unwrap_or_default();
-    Json(json!({ "ok": true, "cached": cached, "uncached": uncached }))
-}
-
 /// `POST /api/providers/profiles` — add or edit an `accounts.conf` row.
 pub(crate) async fn profiles_post_handler(State(state): State<HttpState>, body: String) -> Response {
     let Ok(parsed) = serde_json::from_str::<Value>(&body) else {
@@ -797,32 +657,6 @@ mod tests {
         assert_eq!(b2["error"], "boom");
     }
 
-    // ── provider entry mapping ──
-
-    #[test]
-    fn lmstudio_entry_filters_and_maps_models() {
-        let data = json!([
-            { "id": "emb", "type": "embeddings", "state": "loaded", "loaded_context_length": 2048 },
-            { "id": "a", "type": "vlm", "state": "loaded", "quantization": "Q4", "max_context_length": 100, "loaded_context_length": 64, "capabilities": ["tool_use"] },
-            { "id": "b", "type": "llm", "state": "not-loaded", "quantization": "Q8", "max_context_length": 200 }
-        ]);
-        let entry = lmstudio_provider_entry("http://h", data.as_array().unwrap());
-        assert_eq!(entry["id"], "lmstudio");
-        assert_eq!(entry["kind"], "local");
-        let models = entry["models"].as_array().unwrap();
-        assert_eq!(models.len(), 2, "embeddings filtered out");
-        // loaded model carries loaded_context_length + loaded:true
-        let a = &models[0];
-        assert_eq!(a["id"], "a");
-        assert_eq!(a["loaded"], true);
-        assert_eq!(a["loaded_context_length"], 64);
-        // not-loaded omits loaded_context_length, defaults capabilities to []
-        let b = &models[1];
-        assert_eq!(b["loaded"], false);
-        assert!(b.get("loaded_context_length").is_none());
-        assert_eq!(b["capabilities"], json!([]));
-    }
-
     #[test]
     fn models_success_body_counts_loaded_and_flags_refresh() {
         let models = json!([
@@ -837,43 +671,6 @@ mod tests {
         assert!(body["ts"].as_str().unwrap().ends_with('Z'));
         let refreshed = models_success_body("http://h", arr, true);
         assert_eq!(refreshed["refreshed"], true);
-    }
-
-    // ── on-disk catalogs ──
-
-    #[test]
-    fn list_catalogs_reads_valid_skips_invalid_sorts() {
-        let dir = tmpdir();
-        std::fs::write(
-            dir.join("openai.json"),
-            json!({ "provider": "openai", "source": "live-fetch", "fetched_at": "t", "source_url": "u", "models": [{}, {}] }).to_string(),
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("anthropic.json"),
-            json!({ "provider": "anthropic", "source": "pi-ai-bundle", "fetched_at": "t", "models": [{}] }).to_string(),
-        )
-        .unwrap();
-        // invalid: no models array → skipped
-        std::fs::write(dir.join("bad.json"), json!({ "provider": "bad" }).to_string()).unwrap();
-        // non-json file → skipped
-        std::fs::write(dir.join("notes.txt"), "ignore me").unwrap();
-
-        let cached = do_list_catalogs(&dir);
-        assert_eq!(cached.len(), 2);
-        // sorted by provider
-        assert_eq!(cached[0]["provider"], "anthropic");
-        assert_eq!(cached[1]["provider"], "openai");
-        assert_eq!(cached[1]["model_count"], 2);
-        // source_url absent → null
-        assert_eq!(cached[0]["source_url"], Value::Null);
-        assert_eq!(cached[1]["source_url"], "u");
-    }
-
-    #[test]
-    fn list_catalogs_missing_dir_is_empty() {
-        let dir = tmpdir().join("nope");
-        assert!(do_list_catalogs(&dir).is_empty());
     }
 
     // ── profile CRUD ──
@@ -928,7 +725,7 @@ mod tests {
         let bad = json!({ "alias": "a b", "provider": "anthropic", "email": "e", "config_dir": "d" });
         let (s, _) = do_post_profile(&path, &bad, None).unwrap_err();
         assert_eq!(s, StatusCode::BAD_REQUEST);
-        // provider not in known set → 400
+        // provider not in known set → 400 (write-gate strict when Some)
         let unknown = json!({ "alias": "a", "provider": "nope", "email": "e", "config_dir": "d" });
         let (s, body) = do_post_profile(&path, &unknown, Some(&known(&["anthropic"]))).unwrap_err();
         assert_eq!(s, StatusCode::BAD_REQUEST);
