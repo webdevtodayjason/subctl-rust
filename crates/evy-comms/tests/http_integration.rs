@@ -144,11 +144,41 @@ async fn policy_endpoint_serves_default_policy() {
     shutdown.cancel();
 }
 
+/// GET both the `/api/evy/<rest>` and `/api/master/<rest>` forms of an
+/// endpoint and assert they resolve to the SAME native handler — same
+/// status and byte-identical JSON body. Proves the `/api/master/*` →
+/// `/api/evy/*` rewrite lands legacy callers on the canonical route.
+async fn assert_prefix_parity(base: &str, rest: &str) {
+    let evy = reqwest::get(format!("{base}/api/evy/{rest}"))
+        .await
+        .unwrap_or_else(|e| panic!("GET /api/evy/{rest}: {e}"));
+    let master = reqwest::get(format!("{base}/api/master/{rest}"))
+        .await
+        .unwrap_or_else(|e| panic!("GET /api/master/{rest}: {e}"));
+    assert_eq!(
+        evy.status(),
+        200,
+        "native /api/evy/{rest} must serve directly"
+    );
+    assert_eq!(
+        master.status(),
+        evy.status(),
+        "/api/master/{rest} must mirror its /api/evy twin's status"
+    );
+    let evy_body: Value = evy.json().await.expect("evy json");
+    let master_body: Value = master.json().await.expect("master json");
+    assert_eq!(
+        master_body, evy_body,
+        "/api/master/{rest} must return the same body as /api/evy/{rest}"
+    );
+}
+
 #[tokio::test]
 async fn master_alias_dropped_post_cutover() {
-    // Full-cutover Phase 0 dropped the native `/api/master/*` aliases so they
-    // fall through to the reverse-proxy → the v3 Bun dashboard. The native
-    // `/api/evy/*` routes still serve directly; `/api/master/*` is no longer
+    // The rewrite is SCOPED to the chat-tab surfaces v4 owns natively;
+    // `/api/master/workers` is NOT claimed, so it is left untouched and falls
+    // through to the reverse-proxy → v3 (v3 still owns that data). The native
+    // `/api/evy/*` route still serves directly; the master form is no longer
     // natively handled (no Bun upstream in this harness → non-200).
     let (base, _bcast, shutdown) = spawn_stub_server().await;
 
@@ -163,11 +193,75 @@ async fn master_alias_dropped_post_cutover() {
     assert_ne!(
         res_master.status(),
         200,
-        "/api/master/* must no longer be natively handled post-cutover"
+        "unclaimed /api/master/workers must NOT be served natively (rides the proxy)"
     );
 
     shutdown.cancel();
 }
+
+#[tokio::test]
+async fn master_alias_rewrites_claimed_chat_tab_paths_to_native_twins() {
+    // The chat tab's CLAIMED `/api/master/*` paths are rewritten to `/api/evy/*`
+    // BEFORE routing, so they resolve to the same native handler — byte-for-byte
+    // parity. StubAppState has no partner, so both prefixes return the same
+    // empty-session transcript / context-meter shape.
+    let (base, _bcast, shutdown) = spawn_stub_server().await;
+
+    assert_prefix_parity(&base, "transcript").await;
+    assert_prefix_parity(&base, "context").await;
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn master_events_sse_streams_through_the_rewrite() {
+    // The SSE caveat: `/api/master/events` must stream exactly like
+    // `/api/evy/events`. The rewrite is a request-only `map_request`, so the
+    // long-lived response is never buffered — prove it end-to-end by reading
+    // a real frame off the master-prefixed stream.
+    let (base, broadcaster, shutdown) = spawn_stub_server().await;
+
+    let stream_res = reqwest::Client::new()
+        .get(format!("{base}/api/master/events"))
+        .header("Accept", "text/event-stream")
+        .send()
+        .await
+        .expect("send SSE GET via /api/master/events");
+    assert_eq!(stream_res.status(), 200);
+    let content_type = stream_res
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        content_type.starts_with("text/event-stream"),
+        "expected text/event-stream from the rewritten master path, got {content_type}",
+    );
+
+    let mut events = stream_res.bytes_stream().eventsource();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let emitted = DaemonEvent::Heartbeat {
+        ts: Utc::now(),
+        providers_healthy: 3,
+    };
+    broadcaster.emit(emitted.clone());
+
+    let frame = timeout(Duration::from_secs(2), events.next())
+        .await
+        .expect("SSE next() timed out — rewrite must not buffer the stream")
+        .expect("event stream ended")
+        .expect("event stream errored");
+    let parsed: DaemonEvent = serde_json::from_str(&frame.data)
+        .unwrap_or_else(|e| panic!("could not parse SSE frame '{}': {e}", frame.data));
+    assert_eq!(parsed, emitted);
+
+    shutdown.cancel();
+}
+
+// The unmatched-master-path → proxy fall-through is verified in its own test
+// binary (`master_alias_fallthrough_integration.rs`): it pins
+// `EVY_PROXY_UPSTREAM` at a closed port, which must not race the other tests
+// in this file that share the process env.
 
 #[tokio::test]
 async fn sse_stream_delivers_emitted_events_to_clients() {

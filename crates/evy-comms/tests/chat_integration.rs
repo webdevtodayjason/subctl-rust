@@ -229,21 +229,36 @@ async fn post_chat_returns_404_for_unknown_session() {
 }
 
 #[tokio::test]
-async fn post_chat_master_alias_dropped_in_cutover() {
-    // The legacy `/api/master/chat` alias was intentionally removed in the
-    // full-cutover Phase 0 so it falls through to the reverse-proxy → the v3 Bun
-    // dashboard's Fork A chat bridge. With no Bun upstream in this harness, it
-    // must NOT be served natively (the native chat handler only answers on
-    // `/api/evy/chat`); the catch-all proxy returns a non-200 (502, no upstream).
-    let backend = ScriptedBackend::new(vec!["via alias"]);
+async fn post_chat_master_alias_routes_to_native_handler() {
+    // The dashboard chat tab posts the legacy `/api/master/chat` form. The
+    // `/api/master/*` → `/api/evy/*` rewrite (applied before routing) lands it
+    // on the SAME native chat handler as `/api/evy/chat` — response parity, not
+    // a proxy fall-through. The ScriptedBackend returns the canned reply on
+    // both prefixes, so we assert the master path yields the identical answer.
+    let backend = ScriptedBackend::new(vec!["via evy", "via master"]);
     let partner = Arc::new(ThinkingPartner::new(backend));
     let state = Arc::new(ChatTestState {
         partner: Some(partner),
         skills: None,
     });
     let (base, shutdown) = spawn(state).await;
+    let client = reqwest::Client::new();
 
-    let res = reqwest::Client::new()
+    let evy: ChatResponse = client
+        .post(format!("{base}/api/evy/chat"))
+        .json(&ChatRequest {
+            session_id: None,
+            message: "topic".into(),
+        })
+        .send()
+        .await
+        .expect("send evy")
+        .json()
+        .await
+        .expect("evy json");
+    assert_eq!(evy.response, "via evy");
+
+    let res = client
         .post(format!("{base}/api/master/chat"))
         .json(&ChatRequest {
             session_id: None,
@@ -251,11 +266,16 @@ async fn post_chat_master_alias_dropped_in_cutover() {
         })
         .send()
         .await
-        .expect("send");
-    assert_ne!(
+        .expect("send master");
+    assert_eq!(
         res.status(),
         200,
-        "/api/master/chat must not be natively handled post-cutover"
+        "/api/master/chat must be served by the native handler via the rewrite"
+    );
+    let master: ChatResponse = res.json().await.expect("master json");
+    assert_eq!(
+        master.response, "via master",
+        "/api/master/chat must reach the same native chat handler as /api/evy/chat"
     );
     shutdown.cancel();
 }
