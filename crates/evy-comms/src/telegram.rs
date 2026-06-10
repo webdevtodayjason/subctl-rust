@@ -79,7 +79,7 @@ pub struct InboundMessage {
 }
 
 /// Static configuration for [`TelegramBridge`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TelegramConfig {
     /// Bot API token. From env `TELEGRAM_BOT_TOKEN`; never logged.
     pub bot_token: String,
@@ -98,6 +98,21 @@ pub struct TelegramConfig {
     /// Where inbound non-reply messages are forwarded to the daemon's
     /// command handler. `None` is valid (notify-only mode).
     pub inbound: Option<mpsc::UnboundedSender<InboundMessage>>,
+}
+
+/// Manual `Debug` so no caller can accidentally log the bot token —
+/// the field doc promises "never logged" and this enforces it.
+impl std::fmt::Debug for TelegramConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TelegramConfig")
+            .field("bot_token", &"[redacted]")
+            .field("chat_id", &self.chat_id)
+            .field("poll_interval", &self.poll_interval)
+            .field("long_poll_timeout", &self.long_poll_timeout)
+            .field("base_url", &self.base_url)
+            .field("inbound", &self.inbound.is_some())
+            .finish()
+    }
 }
 
 impl TelegramConfig {
@@ -506,6 +521,14 @@ struct TelegramUser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_redacts_bot_token() {
+        let c = TelegramConfig::new("SECRET123".to_string(), 1);
+        let rendered = format!("{c:?}");
+        assert!(!rendered.contains("SECRET123"), "token leaked: {rendered}");
+        assert!(rendered.contains("[redacted]"));
+    }
 
     #[test]
     fn config_defaults_are_sensible() {

@@ -266,7 +266,7 @@ impl From<HttpSectionConfig> for evy_comms::HttpConfig {
 /// `/getUpdates` against the bot after sending it a message; both are
 /// typically captured under env `TELEGRAM_BOT_TOKEN` /
 /// `TELEGRAM_CHAT_ID` and overridden via figment env layering.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct TelegramSectionConfig {
     /// Bot API token (`@BotFather`). Never logged.
     pub bot_token: String,
@@ -279,6 +279,19 @@ pub struct TelegramSectionConfig {
     /// Default 25000.
     #[serde(default = "default_long_poll_timeout_ms")]
     pub long_poll_timeout_ms: u64,
+}
+
+/// Manual `Debug` so the boot-time `tracing::info!(?config, ...)` line
+/// never writes the bot token to the log file.
+impl std::fmt::Debug for TelegramSectionConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TelegramSectionConfig")
+            .field("bot_token", &"[redacted]")
+            .field("chat_id", &self.chat_id)
+            .field("poll_interval_ms", &self.poll_interval_ms)
+            .field("long_poll_timeout_ms", &self.long_poll_timeout_ms)
+            .finish()
+    }
 }
 
 const fn default_poll_interval_ms() -> u64 {
@@ -539,6 +552,19 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn telegram_section_debug_redacts_bot_token() {
+        let cfg = TelegramSectionConfig {
+            bot_token: "SECRET456".to_string(),
+            chat_id: 1,
+            poll_interval_ms: 1000,
+            long_poll_timeout_ms: 25000,
+        };
+        let rendered = format!("{cfg:?}");
+        assert!(!rendered.contains("SECRET456"), "token leaked: {rendered}");
+        assert!(rendered.contains("[redacted]"));
+    }
 
     fn write_toml(content: &str) -> NamedTempFile {
         let mut f = NamedTempFile::new().unwrap();
