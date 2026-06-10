@@ -77,8 +77,10 @@
 #![warn(missing_docs)]
 
 pub mod auto_nudge;
+pub mod diag_bridge;
 pub mod directive;
 mod error;
+pub mod heartbeat;
 pub mod idle_pane;
 pub mod prune;
 pub mod registry;
@@ -93,7 +95,9 @@ pub mod trait_def;
 mod test_support;
 
 pub use auto_nudge::{AutoNudgeConfig, AutoNudgeWatchdog};
+pub use diag_bridge::{register_default_watchdogs, register_watchdog};
 pub use directive::{DirectiveDispatcher, MockDirectiveDispatcher};
+pub use heartbeat::{HeartbeatWatchdog, DEFAULT_HEARTBEAT_SECS};
 pub use idle_pane::IdlePaneWatchdog;
 pub use prune::WatchdogPrune;
 pub use registry::WatchdogRegistry;

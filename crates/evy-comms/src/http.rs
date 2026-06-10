@@ -163,6 +163,14 @@ pub trait AppState: Send + Sync + 'static {
         None
     }
 
+    /// W5 — the daemon's live watchdog diagnostics registry, if one was
+    /// booted. `GET /api/evy/watchdogs/diag` + the restart/kill routes read
+    /// through this. Default `None` so [`StubAppState`] and other impls keep
+    /// compiling; `DaemonAppState` overrides it with the booted registry.
+    fn watchdog_diag(&self) -> Option<Arc<crate::watchdogs_http::WatchdogDiagRegistry>> {
+        None
+    }
+
     /// Cutover Phase 2 (2j) — spawn a worker on the named account, registering
     /// it so `workers()` reflects it (criterion #1). Default impl returns
     /// [`SpawnError::Unsupported`] so the stub keeps compiling; the daemon's
@@ -524,6 +532,21 @@ fn build_router(
             get(crate::teams_http::team_get_handler)
                 .put(crate::teams_http::team_put_handler)
                 .delete(crate::teams_http::team_delete_handler),
+        )
+        // W5 — native watchdog diagnostics (diag list + per-watchdog
+        // restart/kill). Registered before the `/api/{*rest}` catch-all so
+        // they're served natively rather than reverse-proxied to v3.
+        .route(
+            "/api/evy/watchdogs/diag",
+            get(crate::watchdogs_http::diag_handler),
+        )
+        .route(
+            "/api/evy/watchdogs/{id}/restart",
+            post(crate::watchdogs_http::restart_handler),
+        )
+        .route(
+            "/api/evy/watchdogs/{id}/kill",
+            post(crate::watchdogs_http::kill_handler),
         )
         // Phase 1 — native /api/evy/rate-limits (24h buckets + today_total + 429s).
         .route("/api/evy/rate-limits", get(crate::accounts_http::rate_limits_handler))

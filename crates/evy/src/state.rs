@@ -35,7 +35,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use evy_comms::{AppState, EventBroadcaster, JobSummary, SpawnError, SpawnRequest, WorkerSummary};
+use evy_comms::{
+    AppState, EventBroadcaster, JobSummary, SpawnError, SpawnRequest, WatchdogDiagRegistry,
+    WorkerSummary,
+};
 use evy_core::{Mandate, MandateId, PolicyMode, ProviderKind, WorkerId, WorkerRegistry};
 use evy_memory::ObservationLog;
 use evy_providers::{
@@ -86,6 +89,10 @@ pub struct DaemonAppState {
     /// so `spawn_worker` emits `WorkerRegistered` onto the live bus. Defaults to a
     /// fresh (subscriber-less) broadcaster; the daemon overrides with the shared one.
     pub broadcaster: EventBroadcaster,
+    /// W5 — the live watchdog diagnostics registry. `watchdog_diag()` reads
+    /// through it for `/api/evy/watchdogs/diag` + restart/kill. `None` until
+    /// `run_daemon` boots one.
+    pub watchdog_diag: Option<Arc<WatchdogDiagRegistry>>,
 }
 
 impl DaemonAppState {
@@ -108,7 +115,16 @@ impl DaemonAppState {
             supervisor_label: None,
             worker_registry: WorkerRegistry::new(),
             broadcaster: EventBroadcaster::default(),
+            watchdog_diag: None,
         }
+    }
+
+    /// Attach the watchdog diagnostics registry so `/api/evy/watchdogs/diag`
+    /// and the restart/kill routes read through it. Builder-style.
+    #[must_use]
+    pub fn with_watchdog_diag(mut self, registry: Arc<WatchdogDiagRegistry>) -> Self {
+        self.watchdog_diag = Some(registry);
+        self
     }
 
     /// Attach a shared worker registry (the dispatch path holds a clone of the
@@ -219,6 +235,10 @@ impl AppState for DaemonAppState {
 
     fn supervisor_label(&self) -> Option<String> {
         self.supervisor_label.clone()
+    }
+
+    fn watchdog_diag(&self) -> Option<Arc<WatchdogDiagRegistry>> {
+        self.watchdog_diag.clone()
     }
 
     /// Cutover Phase 2 (2j) — spawn a real Claude Code worker on `req.account`:

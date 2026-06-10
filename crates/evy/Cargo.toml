@@ -29,6 +29,11 @@ evy-memory = { workspace = true }
 # ThinkingPartner and hands it to evy-comms via DaemonAppState.
 evy-thinking = { workspace = true }
 evy-skills = { workspace = true }
+# W5 — watchdog framework. The daemon boots a WatchdogDiagRegistry and arms
+# the framework's HeartbeatWatchdog into it so /api/evy/watchdogs/diag has
+# live data. Direct path dep (not in [workspace.dependencies]) — evy is the
+# first and only consumer of evy-watchdog so far.
+evy-watchdog = { path = "../evy-watchdog", version = "0.1.0" }
 
 # Runtime + observability
 tokio = { workspace = true }
