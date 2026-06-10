@@ -531,6 +531,52 @@ fn build_router(
         // + /api/refresh (bust usage cache). Specific routes → no longer proxied (AC5).
         .route("/api/state", get(crate::accounts_http::state_handler))
         .route("/api/refresh", post(crate::accounts_http::refresh_handler))
+        // Cutover — native projects CRUD + policy presets. Registered under the
+        // canonical `/api/evy/*` prefix AND the bare v3 paths (`/api/projects*`,
+        // `/api/policy/preset*`) so a dashboard proxy hit lands on Rust rather
+        // than falling through to v3 (same pattern as `/api/state`). The static
+        // `…/projects/create` route is registered alongside `…/projects/{name}`;
+        // matchit ranks the literal above the capture, mirroring `teams/tools`.
+        .route(
+            "/api/evy/projects",
+            get(crate::projects_http::projects_list_handler),
+        )
+        .route(
+            "/api/evy/projects/create",
+            post(crate::projects_http::project_create_handler),
+        )
+        .route(
+            "/api/evy/projects/{name}",
+            get(crate::projects_http::project_detail_handler),
+        )
+        .route(
+            "/api/evy/policy/presets",
+            get(crate::projects_http::presets_list_handler),
+        )
+        .route(
+            "/api/evy/policy/preset/{path}",
+            post(crate::projects_http::preset_apply_handler),
+        )
+        .route(
+            "/api/projects",
+            get(crate::projects_http::projects_list_handler),
+        )
+        .route(
+            "/api/projects/create",
+            post(crate::projects_http::project_create_handler),
+        )
+        .route(
+            "/api/projects/{name}",
+            get(crate::projects_http::project_detail_handler),
+        )
+        .route(
+            "/api/policy/presets",
+            get(crate::projects_http::presets_list_handler),
+        )
+        .route(
+            "/api/policy/preset/{path}",
+            post(crate::projects_http::preset_apply_handler),
+        )
         // /api/live (web terminal WS) — WS upgrade can't go through the HTTP
         // reverse-proxy, so it's bridged separately. Specific route wins over
         // the catch-all below.

@@ -93,6 +93,8 @@ pub mod rate_limits;
 pub mod accounts_http;
 // ── Cutover Phase 2 slice 2m: team-template CRUD ──
 pub mod teams_http;
+// ── Cutover: native projects CRUD + policy-preset surface ──
+pub mod projects_http;
 
 // ── Public re-exports — the surface the daemon binary consumes ───────
 
