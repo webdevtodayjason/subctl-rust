@@ -97,6 +97,8 @@ pub mod teams_http;
 pub mod preferences_http;
 // ── Cutover: native projects CRUD + policy-preset surface ──
 pub mod projects_http;
+// ── v4-native session browser (catalog/preview/spawn) + tmux kill ──
+pub mod orch_sessions_http;
 
 // ── Public re-exports — the surface the daemon binary consumes ───────
 
