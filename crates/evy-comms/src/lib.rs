@@ -91,6 +91,8 @@ pub mod usage_cache;
 pub mod rate_limits;
 // ── Cutover Phase 1 slice 1e: /api/evy/accounts (integrated) ──
 pub mod accounts_http;
+// ── Cutover: native cost/savings synthesis (/api/evy/cost + /api/state cost) ──
+pub mod cost_http;
 // ── Cutover Phase 2 slice 2m: team-template CRUD ──
 pub mod teams_http;
 // ── Cutover — native settings/auth-status/update-status read surface ──
