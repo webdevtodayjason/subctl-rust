@@ -104,6 +104,9 @@ pub mod preferences_http;
 pub mod projects_http;
 // ── v4-native session browser (catalog/preview/spawn) + tmux kill ──
 pub mod orch_sessions_http;
+// ── Wave 4 (f2): orchestration-registry reads on the browser-bare paths,
+//    merged view (v4 registry + optional-degraded v3 upstream) ──
+pub mod orch_registry_http;
 // ── v4-parity sprint (W1): providers / models / catalogs family ──
 pub mod providers_http;
 // ── v4-native operator notification tray (port of notifications.ts) ──

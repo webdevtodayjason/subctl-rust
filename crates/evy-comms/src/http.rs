@@ -578,6 +578,23 @@ fn build_router(
             "/api/evy/orchestration/{id}/kill",
             post(orchestration_kill_handler),
         )
+        // Wave 4 (f2) — orchestration-registry reads on the BROWSER-BARE
+        // paths the orch tab + notify-listener hit directly. Served natively
+        // as the MERGED view: v4's registry (source of truth, `origin:"v4"`)
+        // + the v3 upstream's legacy rows (`origin:"v3-legacy"`), deduped by
+        // name; v3 dark ⇒ v4 rows alone, 200 never 5xx. Read-only claim:
+        // `GET /api/orchestration/{name}` and the v3 action dialect
+        // (`/spawn`, `/{name}/msg`, `/{name}/kill`) deliberately stay on the
+        // `/api/{*rest}` catch-all so v3 actions keep operating on v3's
+        // registry this wave. See `orch_registry_http` module docs.
+        .route(
+            "/api/orchestration",
+            get(crate::orch_registry_http::list_handler),
+        )
+        .route(
+            "/api/orchestration/captures",
+            get(crate::orch_registry_http::captures_handler),
+        )
         // Phase 2 (2m) — native team-template CRUD. `/tools` is reverse-proxied
         // (still v3) and registered as a literal so it wins over `/{name}`.
         .route(
