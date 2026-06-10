@@ -93,6 +93,8 @@ pub mod rate_limits;
 pub mod accounts_http;
 // ── Cutover Phase 2 slice 2m: team-template CRUD ──
 pub mod teams_http;
+// ── v4-native session browser (catalog/preview/spawn) + tmux kill ──
+pub mod orch_sessions_http;
 
 // ── Public re-exports — the surface the daemon binary consumes ───────
 

@@ -525,6 +525,26 @@ fn build_router(
                 .put(crate::teams_http::team_put_handler)
                 .delete(crate::teams_http::team_delete_handler),
         )
+        // v4-native session browser + tmux kill (W4). Static children
+        // (`list`/`preview`/`spawn`) sit beside `sessions_http`'s `{id}`
+        // param route registered above — matchit lets them coexist, and
+        // `/{id}/kill` reuses the same `{id}` param name (no conflict).
+        .route(
+            "/api/evy/sessions/list",
+            get(crate::orch_sessions_http::sessions_list_handler),
+        )
+        .route(
+            "/api/evy/sessions/preview",
+            get(crate::orch_sessions_http::sessions_preview_handler),
+        )
+        .route(
+            "/api/evy/sessions/spawn",
+            post(crate::orch_sessions_http::sessions_spawn_handler),
+        )
+        .route(
+            "/api/evy/sessions/{id}/kill",
+            post(crate::orch_sessions_http::sessions_kill_handler),
+        )
         // Phase 1 — native /api/evy/rate-limits (24h buckets + today_total + 429s).
         .route("/api/evy/rate-limits", get(crate::accounts_http::rate_limits_handler))
         // Phase 1 — native /api/state (overlay native accounts+dispatch on Bun base)
