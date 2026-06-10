@@ -510,7 +510,12 @@ pub async fn run_daemon_with_shutdown(
     // notify/ask HTTP surface (criterion #6) holds a handle. The clone
     // moved into `run(token)` below is the long-lived poll loop.
     let telegram_bridge = config.comms.telegram.clone().map(|tg| {
-        let bridge = TelegramBridge::new(tg.into(), ask_registry.clone());
+        let mut tcfg: evy_comms::TelegramConfig = tg.into();
+        // Wave 4 (orch events) — share the SSE broadcaster so inbound
+        // operator messages surface on /api/evy/events as the cockpit's
+        // named `inbound` frame (orch.js live feed).
+        tcfg.events = Some(event_broadcaster.clone());
+        let bridge = TelegramBridge::new(tcfg, ask_registry.clone());
         tracing::info!("telegram bridge configured");
         bridge
     });
