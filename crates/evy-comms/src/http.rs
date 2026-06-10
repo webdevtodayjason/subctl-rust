@@ -632,6 +632,34 @@ fn build_router(
             post(crate::providers_http::profiles_post_handler)
                 .delete(crate::providers_http::profiles_delete_handler),
         )
+        // W6 — v4-native operator notification tray (port of notifications.ts).
+        // The live SSE channel (`/notifications/stream`) stays on the v3
+        // reverse-proxy fallback, like `/api/evy/teams/tools`.
+        .route(
+            "/api/evy/notifications",
+            get(crate::notifications_http::list_handler),
+        )
+        .route(
+            "/api/evy/notifications/read-all",
+            post(crate::notifications_http::read_all_handler),
+        )
+        .route(
+            "/api/evy/notifications/{id}/read",
+            post(crate::notifications_http::mark_read_handler),
+        )
+        // W6 — v4-native chat attachments (port of attachments.ts; closes the
+        // V4_BRIDGE.md deferral). Upload/list on the collection, serve/delete
+        // on the id. `{id}` is bare-hex-validated in the handlers.
+        .route(
+            "/api/evy/attachments",
+            get(crate::attachments_http::list_handler)
+                .post(crate::attachments_http::upload_handler),
+        )
+        .route(
+            "/api/evy/attachments/{id}",
+            get(crate::attachments_http::serve_handler)
+                .delete(crate::attachments_http::delete_handler),
+        )
         // /api/live (web terminal WS) — WS upgrade can't go through the HTTP
         // reverse-proxy, so it's bridged separately. Specific route wins over
         // the catch-all below.

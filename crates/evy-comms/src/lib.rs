@@ -103,6 +103,10 @@ pub mod projects_http;
 pub mod orch_sessions_http;
 // ── v4-parity sprint (W1): providers / models / catalogs family ──
 pub mod providers_http;
+// ── v4-native operator notification tray (port of notifications.ts) ──
+pub mod notifications_http;
+// ── v4-native chat attachments (port of attachments.ts) ──
+pub mod attachments_http;
 
 // ── Public re-exports — the surface the daemon binary consumes ───────
 
