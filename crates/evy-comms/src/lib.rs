@@ -107,6 +107,8 @@ pub mod providers_http;
 pub mod notifications_http;
 // ── v4-native chat attachments (port of attachments.ts) ──
 pub mod attachments_http;
+// ── W5: watchdog diagnostics surface (diag + restart + kill) ──
+pub mod watchdogs_http;
 
 // ── Public re-exports — the surface the daemon binary consumes ───────
 
@@ -132,3 +134,7 @@ pub use sessions_http::{SessionSummary, SessionsError, SessionsListResponse};
 pub use skills_http::{SkillSummary, SkillsError, SkillsListResponse};
 
 pub use providers_http::ProviderCatalogData;
+pub use watchdogs_http::{
+    KillOutcome, LastError, RestartOutcome, TickFn, TickFuture, TickOutcome, TickRecord,
+    WatchdogDiag, WatchdogDiagRegistry, WatchdogSpec, WatchdogStatus,
+};

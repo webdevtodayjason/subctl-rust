@@ -447,6 +447,18 @@ pub async fn run_daemon_with_shutdown(
     let event_broadcaster = EventBroadcaster::default();
     let ask_registry = Arc::new(AskRegistry::new());
 
+    // W5 — boot the watchdog diagnostics registry and arm the framework's
+    // HeartbeatWatchdog so `/api/evy/watchdogs/diag` reports a real ticking
+    // watchdog. Registration-only: the registry owns its per-watchdog tick
+    // tasks under its own cancellation token; we cancel them in the drain.
+    let watchdog_registry = Arc::new(evy_comms::WatchdogDiagRegistry::new());
+    evy_watchdog::register_default_watchdogs(
+        &watchdog_registry,
+        scheduler.clone(),
+        event_broadcaster.clone(),
+        obs_log.clone(),
+    );
+
     // Phase 5 + 6 — optional skill registry. Loaded if `[skills]` is
     // enabled; passed to the thinking-partner so the chat surface can
     // see which skills the model has access to per turn. Failure to
@@ -529,6 +541,8 @@ pub async fn run_daemon_with_shutdown(
     // Phase 2 (2j) — share the SSE broadcaster so spawn_worker emits
     // WorkerRegistered onto the same bus the HTTP server serves.
     app_state = app_state.with_event_broadcaster(event_broadcaster.clone());
+    // W5 — hand the diag registry to the HTTP surface.
+    app_state = app_state.with_watchdog_diag(watchdog_registry.clone());
     let app_state = Arc::new(app_state);
     let http_server = HttpServer::new(
         config.comms.http.clone().into(),
@@ -613,6 +627,8 @@ pub async fn run_daemon_with_shutdown(
     tracing::info!("shutdown token fired; draining");
 
     // ── 7. Graceful drain ────────────────────────────────────────────
+    // W5 — stop the watchdog tick tasks (cancels every per-watchdog loop).
+    watchdog_registry.shutdown();
     if let Err(e) = scheduler.stop().await {
         tracing::error!(error = %e, "scheduler shutdown failed; continuing exit");
     }

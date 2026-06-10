@@ -754,6 +754,7 @@ dependencies = [
  "evy-scheduler",
  "evy-skills",
  "evy-thinking",
+ "evy-watchdog",
  "figment",
  "futures-util",
  "reqwest",
