@@ -527,6 +527,8 @@ fn build_router(
         )
         // Phase 1 — native /api/evy/rate-limits (24h buckets + today_total + 429s).
         .route("/api/evy/rate-limits", get(crate::accounts_http::rate_limits_handler))
+        // Cutover — native /api/evy/cost (v3 CostBundle; also feeds /api/state.cost).
+        .route("/api/evy/cost", get(crate::cost_http::cost_handler))
         // Phase 1 — native /api/state (overlay native accounts+dispatch on Bun base)
         // + /api/refresh (bust usage cache). Specific routes → no longer proxied (AC5).
         .route("/api/state", get(crate::accounts_http::state_handler))

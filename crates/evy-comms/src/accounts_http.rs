@@ -185,15 +185,18 @@ async fn fetch_bun_state() -> Option<serde_json::Value> {
 }
 
 /// Build the native `/api/state` composite (slice 1e). Overlays v4-native
-/// `accounts` + `dispatch` (severity best-of) onto the Bun base, so the verdict
-/// pill and accounts table are native while sessions/orch/cost keep rendering
-/// from v3 until their phases. Falls back to a minimal native object if Bun is
-/// down. Shared by the HTTP handler and the `/api/live` liveness broadcast (1f).
+/// `accounts` + `dispatch` (severity best-of) + `cost` onto the Bun base, so the
+/// verdict pill, accounts table, and cost panel are native while sessions/orch
+/// keep rendering from v3 until their phases. Falls back to a minimal native
+/// object if Bun is down. Shared by the HTTP handler and the `/api/live` liveness
+/// broadcast (1f).
 pub(crate) async fn build_state() -> serde_json::Value {
     let now_ms = chrono::Utc::now().timestamp_millis();
     let accounts = build_account_summaries(now_ms).await;
     let av: Vec<(String, AccountVerdict)> = accounts.iter().map(AccountSummary::alias_and_verdict).collect();
     let dispatch = dispatch_verdict(&av);
+    // Cost seam — native CostBundle replaces the v3-proxied `cost` field.
+    let cost = crate::cost_http::cost_value(now_ms).await;
 
     let mut base = fetch_bun_state()
         .await
@@ -202,6 +205,7 @@ pub(crate) async fn build_state() -> serde_json::Value {
     if let Some(obj) = base.as_object_mut() {
         obj.insert("accounts".into(), serde_json::to_value(&accounts).unwrap_or(serde_json::Value::Null));
         obj.insert("dispatch".into(), serde_json::to_value(&dispatch).unwrap_or(serde_json::Value::Null));
+        obj.insert("cost".into(), cost);
     }
     base
 }
