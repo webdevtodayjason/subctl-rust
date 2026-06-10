@@ -8,7 +8,7 @@
 //! non-breaking. Consumers that don't know a variant should ignore it
 //! rather than fail.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use evy_core::{MandateId, ProviderKind, WorkerId, WorkerStatus};
 use evy_scheduler::{JobId, RunOutcome};
 use serde::{Deserialize, Serialize};
@@ -169,6 +169,88 @@ impl DaemonEvent {
             data: "{}".to_string(),
         }
     }
+
+    /// `event: agent_end` — the v3-master turn terminator alias, emitted
+    /// immediately after `message_end` on the chat turn path. The per-project
+    /// one-shot capture (`chat.js` `attachOneShotAssistantCapture`, ~line 812)
+    /// closes its EventSource ONLY on `agent_end`; without it every
+    /// per-project panel leaks a live SSE connection per turn until its 90s
+    /// safety timeout. No payload is parsed.
+    #[must_use]
+    pub(crate) fn dashboard_agent_end() -> Self {
+        Self::DashboardFrame {
+            event: "agent_end".to_string(),
+            data: "{}".to_string(),
+        }
+    }
+
+    /// `event: inbound` — an operator message arrived (e.g. via the Telegram
+    /// bridge). The cockpit live feed (`orch.js:439-444`) parses `{source,
+    /// text}`; `ts` mirrors v3's `new Date().toISOString()` for parity.
+    #[must_use]
+    pub(crate) fn dashboard_inbound(source: &str, text: &str) -> Self {
+        let data = json!({ "source": source, "text": text, "ts": now_iso() }).to_string();
+        Self::DashboardFrame {
+            event: "inbound".to_string(),
+            data,
+        }
+    }
+
+    /// `event: team_event` — an orchestration/session registry change
+    /// (spawn / kill / state-change). The cockpit live feed
+    /// (`orch.js:445-450`) renders `{team, type, text}`.
+    ///
+    /// `pub` (not `pub(crate)`): the registry-change emitters live in
+    /// `evy-watchdog` (team-gc) and the `evy` daemon (native spawn/kill),
+    /// so the wire shape stays centralised here while the transition
+    /// points stay in their owning crates.
+    #[must_use]
+    pub fn dashboard_team_event(team: &str, kind: &str, text: &str) -> Self {
+        let data = json!({ "team": team, "type": kind, "text": text, "ts": now_iso() }).to_string();
+        Self::DashboardFrame {
+            event: "team_event".to_string(),
+            data,
+        }
+    }
+
+    /// `event: watchdog_fire` — a watchdog tripped. The cockpit
+    /// (`orch.js:451-457`) renders `prompt` in the live feed and counts
+    /// `stale.length` for the watchdog panel; `ts` stamps the panel row.
+    ///
+    /// `pub` for the same cross-crate reason as
+    /// [`DaemonEvent::dashboard_team_event`] — the native emitter is
+    /// `evy-watchdog`'s team-staleness machinery.
+    #[must_use]
+    pub fn dashboard_watchdog_fire(prompt: &str, stale: &[String]) -> Self {
+        let data = json!({ "ts": now_iso(), "prompt": prompt, "stale": stale }).to_string();
+        Self::DashboardFrame {
+            event: "watchdog_fire".to_string(),
+            data,
+        }
+    }
+
+    /// `event: watchdog_ok` — a clean watchdog pass. The cockpit
+    /// (`orch.js:458-464`) renders `{teams_tracked, stale}` (both numbers)
+    /// plus `ts` in the watchdog panel.
+    ///
+    /// `pub` for the same cross-crate reason as
+    /// [`DaemonEvent::dashboard_team_event`].
+    #[must_use]
+    pub fn dashboard_watchdog_ok(teams_tracked: usize, stale: usize) -> Self {
+        let data =
+            json!({ "ts": now_iso(), "teams_tracked": teams_tracked, "stale": stale }).to_string();
+        Self::DashboardFrame {
+            event: "watchdog_ok".to_string(),
+            data,
+        }
+    }
+}
+
+/// UTC now in the exact shape JS `new Date().toISOString()` produces
+/// (`2026-06-10T22:00:00.000Z`) — v3 stamped every cockpit frame this way,
+/// so consumers see zero format drift.
+fn now_iso() -> String {
+    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
 #[cfg(test)]
@@ -281,6 +363,87 @@ mod tests {
             DaemonEvent::DashboardFrame { event, .. } => assert_eq!(event, "transcript_cleared"),
             other => panic!("expected DashboardFrame, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn dashboard_agent_end_is_an_empty_named_frame() {
+        // chat.js's one-shot capture closes on the EVENT NAME alone.
+        match DaemonEvent::dashboard_agent_end() {
+            DaemonEvent::DashboardFrame { event, data } => {
+                assert_eq!(event, "agent_end");
+                assert_eq!(data, "{}");
+            }
+            other => panic!("expected DashboardFrame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dashboard_inbound_carries_the_orch_js_fields() {
+        // orch.js:439 parses {source, text}; ts is stamped for parity.
+        let DaemonEvent::DashboardFrame { event, data } =
+            DaemonEvent::dashboard_inbound("telegram", "deploy it")
+        else {
+            panic!("expected DashboardFrame");
+        };
+        assert_eq!(event, "inbound");
+        let v: serde_json::Value = serde_json::from_str(&data).expect("valid JSON");
+        assert_eq!(v["source"], "telegram");
+        assert_eq!(v["text"], "deploy it");
+        assert!(v["ts"].as_str().unwrap().ends_with('Z'));
+    }
+
+    #[test]
+    fn dashboard_team_event_carries_the_orch_js_fields() {
+        // orch.js:445 renders {team, type, text}.
+        let DaemonEvent::DashboardFrame { event, data } =
+            DaemonEvent::dashboard_team_event("claude-subctl", "spawn", "worker abc — ship it")
+        else {
+            panic!("expected DashboardFrame");
+        };
+        assert_eq!(event, "team_event");
+        let v: serde_json::Value = serde_json::from_str(&data).expect("valid JSON");
+        assert_eq!(v["team"], "claude-subctl");
+        assert_eq!(v["type"], "spawn");
+        assert_eq!(v["text"], "worker abc — ship it");
+    }
+
+    #[test]
+    fn dashboard_watchdog_fire_carries_prompt_and_stale_array() {
+        // orch.js:451 renders prompt + (stale || []).length.
+        let stale = vec!["quiet".to_string(), "ghost".to_string()];
+        let DaemonEvent::DashboardFrame { event, data } =
+            DaemonEvent::dashboard_watchdog_fire("2 stale team(s) — quiet (120min)", &stale)
+        else {
+            panic!("expected DashboardFrame");
+        };
+        assert_eq!(event, "watchdog_fire");
+        let v: serde_json::Value = serde_json::from_str(&data).expect("valid JSON");
+        assert_eq!(v["prompt"], "2 stale team(s) — quiet (120min)");
+        assert_eq!(v["stale"], serde_json::json!(["quiet", "ghost"]));
+        assert!(v["ts"].as_str().unwrap().ends_with('Z'));
+    }
+
+    #[test]
+    fn dashboard_watchdog_ok_carries_numeric_counts() {
+        // orch.js:458 renders {teams_tracked ?? 0, stale ?? 0} as numbers.
+        let DaemonEvent::DashboardFrame { event, data } = DaemonEvent::dashboard_watchdog_ok(3, 0)
+        else {
+            panic!("expected DashboardFrame");
+        };
+        assert_eq!(event, "watchdog_ok");
+        let v: serde_json::Value = serde_json::from_str(&data).expect("valid JSON");
+        assert_eq!(v["teams_tracked"], 3);
+        assert_eq!(v["stale"], 0);
+        assert!(v["ts"].as_str().unwrap().ends_with('Z'));
+    }
+
+    #[test]
+    fn now_iso_matches_js_to_iso_string_shape() {
+        // `2026-06-10T22:00:00.000Z` — millisecond precision, Z suffix.
+        let ts = now_iso();
+        assert!(ts.ends_with('Z'), "got {ts}");
+        let dot = ts.rfind('.').expect("fractional seconds present");
+        assert_eq!(ts.len() - dot, 5, "expected .mmmZ tail, got {ts}");
     }
 
     #[test]

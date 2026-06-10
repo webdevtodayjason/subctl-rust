@@ -40,3 +40,15 @@ tracing = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 tempfile = "3"
+# The Wave-4 suite in `tests/phase5_watchdogs.rs` subscribes to a LIVE
+# `/api/evy/events` stream served by evy-comms's HttpServer to prove the
+# cockpit frames reach the wire. Version pins mirror the choices already
+# made in evy-comms / evy (same pattern as evy's cutover harness) so the
+# dep graph stays tight.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+    "stream",
+] }
+eventsource-stream = "0.2"
+futures-util = "0.3"

@@ -36,8 +36,8 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use evy_comms::{
-    AppState, EventBroadcaster, JobSummary, SpawnError, SpawnRequest, WatchdogDiagRegistry,
-    WorkerSummary,
+    AppState, DaemonEvent, EventBroadcaster, JobSummary, SpawnError, SpawnRequest,
+    WatchdogDiagRegistry, WorkerSummary,
 };
 use evy_core::{Mandate, MandateId, PolicyMode, ProviderKind, WorkerId, WorkerRegistry};
 use evy_memory::ObservationLog;
@@ -336,7 +336,15 @@ impl AppState for DaemonAppState {
             (id, session)
         };
         // 2l — record the hosting session so the Orch panel can probe liveness + kill.
-        self.worker_registry.set_tmux_session(&worker_id, session);
+        self.worker_registry
+            .set_tmux_session(&worker_id, session.clone());
+        // Registry change → named `team_event` frame for the dashboard
+        // cockpit's live feed (orch.js renders {team, type, text}).
+        self.broadcaster.emit(DaemonEvent::dashboard_team_event(
+            &session,
+            "spawn",
+            &format!("worker {} — {}", worker_id.0, mandate.goal),
+        ));
         Ok(worker_id)
     }
 
@@ -371,6 +379,14 @@ impl AppState for DaemonAppState {
                 .map_err(|e| SpawnError::Spawn(e.to_string()))?;
         }
         self.worker_registry.remove(&id);
+        // Registry change → named `team_event` frame for the dashboard
+        // cockpit's live feed (orch.js renders {team, type, text}).
+        let team = rec.tmux_session.clone().unwrap_or_else(|| id.0.to_string());
+        self.broadcaster.emit(DaemonEvent::dashboard_team_event(
+            &team,
+            "kill",
+            &format!("worker {} killed", id.0),
+        ));
         Ok(true)
     }
 

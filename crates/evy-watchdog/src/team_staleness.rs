@@ -43,6 +43,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use evy_comms::DaemonEvent;
 use evy_core::Result;
 
 use crate::report::{Finding, TickReport};
@@ -132,11 +133,15 @@ impl Watchdog for TeamStalenessWatchdog {
         WatchdogSchedule::EveryNSecs(self.tick_interval_secs)
     }
 
-    async fn tick(&self, _ctx: &WatchdogContext) -> Result<TickReport> {
+    async fn tick(&self, ctx: &WatchdogContext) -> Result<TickReport> {
         let teams = self.teams.list().await?;
+        let teams_tracked = teams.len();
         let now = Utc::now();
         let threshold_secs = i64::try_from(self.config.stale_threshold_secs).unwrap_or(i64::MAX);
         let mut findings = Vec::new();
+        // `(team_name, age_minutes)` pairs backing the `watchdog_fire`
+        // frame's prompt + stale array (the cockpit's wire contract).
+        let mut stale_teams: Vec<(String, i64)> = Vec::new();
 
         for record in teams {
             // Regression sentinel for the 2026-05-18 bug — never page
@@ -161,11 +166,36 @@ impl Watchdog for TeamStalenessWatchdog {
 
             let age = now.signed_duration_since(last_activity).num_seconds();
             if age >= threshold_secs {
+                stale_teams.push((record.team_id.clone(), age / 60));
                 findings.push(Finding::StaleTeam {
                     team_name: record.team_id,
                     last_activity,
                 });
             }
+        }
+
+        // The trip/recover signal the cockpit listens for (orch.js):
+        // a clean pass broadcasts `watchdog_ok` with the tracked/stale
+        // counts; a tripped pass broadcasts `watchdog_fire` with the
+        // operator-readable prompt + the stale team-name array. This is
+        // the v4-native home of v3's team-staleness sweep emit
+        // (`components/evy/server.ts` runWatchdogTick).
+        if stale_teams.is_empty() {
+            ctx.events
+                .emit(DaemonEvent::dashboard_watchdog_ok(teams_tracked, 0));
+        } else {
+            let summary = stale_teams
+                .iter()
+                .map(|(name, age_min)| format!("{name} ({age_min}min)"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let prompt = format!(
+                "team-staleness: {} stale team(s) — {summary}",
+                stale_teams.len()
+            );
+            let stale_names: Vec<String> = stale_teams.into_iter().map(|(name, _)| name).collect();
+            ctx.events
+                .emit(DaemonEvent::dashboard_watchdog_fire(&prompt, &stale_names));
         }
 
         if findings.is_empty() {
@@ -367,5 +397,88 @@ mod tests {
     fn default_config_matches_constants() {
         let cfg = TeamStalenessConfig::default();
         assert_eq!(cfg.stale_threshold_secs, DEFAULT_STALE_THRESHOLD_SECS);
+    }
+
+    /// Drain the broadcaster until the first `DashboardFrame`, returning
+    /// `(event, parsed data)`. Panics if none is buffered.
+    fn next_dashboard_frame(
+        rx: &mut tokio::sync::broadcast::Receiver<DaemonEvent>,
+    ) -> (String, serde_json::Value) {
+        loop {
+            match rx.try_recv().expect("a DashboardFrame must be buffered") {
+                DaemonEvent::DashboardFrame { event, data } => {
+                    let parsed = serde_json::from_str(&data).expect("frame data is JSON");
+                    return (event, parsed);
+                }
+                _ => continue,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn clean_pass_emits_watchdog_ok_with_counts() {
+        let (ctx, _guards) = watchdog_ctx().await;
+        let mut rx = ctx.events.subscribe();
+        let teams = registry_with(vec![TeamRecord {
+            team_id: "fresh".into(),
+            tmux_session: "claude-fresh".into(),
+            last_activity: Some(Utc::now()),
+        }]);
+        let tmux = Arc::new(MockTmuxQuery::new());
+        tmux.set_sessions(["claude-fresh"]);
+        let w = TeamStalenessWatchdog::new(teams, tmux);
+        w.tick(&ctx).await.unwrap();
+
+        let (event, data) = next_dashboard_frame(&mut rx);
+        assert_eq!(event, "watchdog_ok");
+        assert_eq!(data["teams_tracked"], 1);
+        assert_eq!(data["stale"], 0);
+        assert!(data["ts"].as_str().unwrap().ends_with('Z'));
+    }
+
+    #[tokio::test]
+    async fn tripped_pass_emits_watchdog_fire_with_prompt_and_stale_array() {
+        let (ctx, _guards) = watchdog_ctx().await;
+        let mut rx = ctx.events.subscribe();
+        let teams = registry_with(vec![TeamRecord {
+            team_id: "quiet".into(),
+            tmux_session: "claude-quiet".into(),
+            last_activity: Some(Utc::now() - ChronoDuration::hours(2)),
+        }]);
+        let tmux = Arc::new(MockTmuxQuery::new());
+        tmux.set_sessions(["claude-quiet"]);
+        let w = TeamStalenessWatchdog::new(teams, tmux);
+        w.tick(&ctx).await.unwrap();
+
+        let (event, data) = next_dashboard_frame(&mut rx);
+        assert_eq!(event, "watchdog_fire");
+        assert_eq!(data["stale"], serde_json::json!(["quiet"]));
+        let prompt = data["prompt"].as_str().unwrap();
+        assert!(prompt.contains("quiet"), "prompt names the team: {prompt}");
+        assert!(
+            prompt.contains("120min"),
+            "prompt carries the age: {prompt}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dead_session_team_counts_as_tracked_but_emits_ok() {
+        // Regression-sentinel companion: a dead-session team must not
+        // trip the fire frame either — the GC watchdog owns that path.
+        let (ctx, _guards) = watchdog_ctx().await;
+        let mut rx = ctx.events.subscribe();
+        let teams = registry_with(vec![TeamRecord {
+            team_id: "ghost".into(),
+            tmux_session: "claude-ghost".into(),
+            last_activity: Some(Utc::now() - ChronoDuration::days(1)),
+        }]);
+        let tmux = Arc::new(MockTmuxQuery::new()); // no live sessions
+        let w = TeamStalenessWatchdog::new(teams, tmux);
+        w.tick(&ctx).await.unwrap();
+
+        let (event, data) = next_dashboard_frame(&mut rx);
+        assert_eq!(event, "watchdog_ok");
+        assert_eq!(data["teams_tracked"], 1);
+        assert_eq!(data["stale"], 0);
     }
 }

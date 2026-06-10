@@ -29,6 +29,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use evy_comms::DaemonEvent;
 use evy_core::Result;
 
 use crate::report::{Finding, TickReport};
@@ -93,7 +94,7 @@ impl Watchdog for TeamGcWatchdog {
         WatchdogSchedule::EveryNSecs(self.tick_interval_secs)
     }
 
-    async fn tick(&self, _ctx: &WatchdogContext) -> Result<TickReport> {
+    async fn tick(&self, ctx: &WatchdogContext) -> Result<TickReport> {
         let teams = self.teams.list().await?;
         let now = Utc::now();
         let mut findings = Vec::new();
@@ -125,6 +126,14 @@ impl Watchdog for TeamGcWatchdog {
                 "tmux_session_gone:stale_activity"
             };
             self.teams.remove(&record.team_id).await?;
+            // Registry state-change → named `team_event` frame for the
+            // dashboard cockpit's live feed (orch.js renders {team, type,
+            // text}).
+            ctx.events.emit(DaemonEvent::dashboard_team_event(
+                &record.team_id,
+                "dead",
+                reason,
+            ));
             findings.push(Finding::DeadTeam {
                 team: record.team_id,
                 reason: reason.into(),
@@ -190,6 +199,34 @@ mod tests {
             if team == "ghost" && reason.contains("no_activity")
         ));
         assert_eq!(registry.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn gc_removal_emits_team_event_frame() {
+        // The cockpit live feed (orch.js `team_event` listener) must see
+        // every registry removal as {team, type:"dead", text:<reason>}.
+        let (ctx, _guards) = watchdog_ctx().await;
+        let mut rx = ctx.events.subscribe();
+        let registry = registry_with(vec![TeamRecord {
+            team_id: "ghost".into(),
+            tmux_session: "claude-ghost".into(),
+            last_activity: None,
+        }]);
+        let tmux = Arc::new(MockTmuxQuery::new()); // session gone
+        let w = TeamGcWatchdog::new(registry.clone(), tmux);
+        w.tick(&ctx).await.unwrap();
+
+        let frame = loop {
+            match rx.try_recv().expect("a DashboardFrame must be buffered") {
+                DaemonEvent::DashboardFrame { event, data } => break (event, data),
+                _ => continue,
+            }
+        };
+        assert_eq!(frame.0, "team_event");
+        let data: serde_json::Value = serde_json::from_str(&frame.1).expect("frame data is JSON");
+        assert_eq!(data["team"], "ghost");
+        assert_eq!(data["type"], "dead");
+        assert_eq!(data["text"], "tmux_session_gone:no_activity");
     }
 
     #[tokio::test]

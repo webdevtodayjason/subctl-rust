@@ -98,6 +98,12 @@ pub struct TelegramConfig {
     /// Where inbound non-reply messages are forwarded to the daemon's
     /// command handler. `None` is valid (notify-only mode).
     pub inbound: Option<mpsc::UnboundedSender<InboundMessage>>,
+    /// Live SSE broadcaster shared with the HTTP server. When present,
+    /// every authorized non-ask inbound also emits a named `inbound`
+    /// frame onto `/api/evy/events` so the dashboard cockpit's live feed
+    /// (`orch.js`) sees operator traffic. `None` keeps the bridge
+    /// decoupled in notify-only / headless deployments.
+    pub events: Option<crate::sse::EventBroadcaster>,
 }
 
 /// Manual `Debug` so no caller can accidentally log the bot token —
@@ -111,6 +117,7 @@ impl std::fmt::Debug for TelegramConfig {
             .field("long_poll_timeout", &self.long_poll_timeout)
             .field("base_url", &self.base_url)
             .field("inbound", &self.inbound.is_some())
+            .field("events", &self.events.is_some())
             .finish()
     }
 }
@@ -127,6 +134,7 @@ impl TelegramConfig {
             long_poll_timeout: Duration::from_secs(25),
             base_url: "https://api.telegram.org".to_string(),
             inbound: None,
+            events: None,
         }
     }
 }
@@ -481,7 +489,15 @@ impl TelegramBridge {
             return Ok(());
         }
 
-        // Otherwise dispatch as a normal inbound message.
+        // Otherwise dispatch as a normal inbound message. Surface it on
+        // the dashboard live feed first — the cockpit (`orch.js`) listens
+        // for the named `inbound` frame regardless of whether a daemon
+        // command handler is wired.
+        if let Some(events) = self.inner.config.events.as_ref() {
+            events.emit(crate::events::DaemonEvent::dashboard_inbound(
+                "telegram", text,
+            ));
+        }
         if let Some(tx) = self.inner.config.inbound.as_ref() {
             let inbound = InboundMessage {
                 chat_id: message.chat.as_ref().map(|c| c.id).unwrap_or(0),
