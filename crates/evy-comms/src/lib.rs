@@ -93,6 +93,8 @@ pub mod rate_limits;
 pub mod accounts_http;
 // ── Cutover Phase 2 slice 2m: team-template CRUD ──
 pub mod teams_http;
+// ── v4-parity sprint (W1): providers / models / catalogs family ──
+pub mod providers_http;
 
 // ── Public re-exports — the surface the daemon binary consumes ───────
 
@@ -116,3 +118,5 @@ pub use chat::{ChatError, ChatRequest, ChatResponse, ChatStreamEvent};
 
 pub use sessions_http::{SessionSummary, SessionsError, SessionsListResponse};
 pub use skills_http::{SkillSummary, SkillsError, SkillsListResponse};
+
+pub use providers_http::ProviderCatalogData;

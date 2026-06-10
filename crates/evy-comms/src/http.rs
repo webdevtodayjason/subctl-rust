@@ -163,6 +163,20 @@ pub trait AppState: Send + Sync + 'static {
         None
     }
 
+    /// v4-parity sprint (W1) — pi-ai-catalog-derived data for the
+    /// providers/models/catalogs family (`GET /api/providers` cloud rows,
+    /// `GET /api/catalogs` `uncached[]`, and the `POST /api/providers/profiles`
+    /// write-gate id set).
+    ///
+    /// Default `None` means the daemon hasn't wired the
+    /// `@earendil-works/pi-ai` registry yet; handlers then return the v3
+    /// wire shape with the catalog-derived arrays empty while LM Studio,
+    /// the on-disk catalog cache, and `accounts.conf` data still serve
+    /// natively. The daemon overrides this once the registry is available.
+    fn provider_catalog(&self) -> Option<crate::providers_http::ProviderCatalogData> {
+        None
+    }
+
     /// Cutover Phase 2 (2j) — spawn a worker on the named account, registering
     /// it so `workers()` reflects it (criterion #1). Default impl returns
     /// [`SpawnError::Unsupported`] so the stub keeps compiling; the daemon's
@@ -531,6 +545,23 @@ fn build_router(
         // + /api/refresh (bust usage cache). Specific routes → no longer proxied (AC5).
         .route("/api/state", get(crate::accounts_http::state_handler))
         .route("/api/refresh", post(crate::accounts_http::refresh_handler))
+        // v4-parity sprint (W1) — native providers / models / catalogs family.
+        // LM Studio model catalog (native API) + force-refresh.
+        .route("/api/models", get(crate::providers_http::models_handler))
+        .route(
+            "/api/models/refresh",
+            post(crate::providers_http::models_refresh_handler),
+        )
+        // Provider catalog (live lmstudio row + daemon-supplied pi-ai cloud rows).
+        .route("/api/providers", get(crate::providers_http::providers_handler))
+        // accounts.conf profile add/edit (POST) + remove (DELETE).
+        .route(
+            "/api/providers/profiles",
+            post(crate::providers_http::profiles_post_handler)
+                .delete(crate::providers_http::profiles_delete_handler),
+        )
+        // On-disk per-provider catalog cache (cached[]) + pi-ai bundle (uncached[]).
+        .route("/api/catalogs", get(crate::providers_http::catalogs_handler))
         // /api/live (web terminal WS) — WS upgrade can't go through the HTTP
         // reverse-proxy, so it's bridged separately. Specific route wins over
         // the catch-all below.
