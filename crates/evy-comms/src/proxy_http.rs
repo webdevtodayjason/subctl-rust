@@ -40,11 +40,14 @@ const HOP_BY_HOP: &[&str] = &[
     "content-length",
 ];
 
-fn upstream_base() -> String {
+/// `pub(crate)` — `orch_registry_http` reuses the same upstream + client
+/// for its optional-degraded v3 registry fetch (read per request, so tests
+/// can repoint `EVY_PROXY_UPSTREAM` between scenarios).
+pub(crate) fn upstream_base() -> String {
     std::env::var("EVY_PROXY_UPSTREAM").unwrap_or_else(|_| "127.0.0.1:8787".to_string())
 }
 
-fn client() -> &'static reqwest::Client {
+pub(crate) fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
