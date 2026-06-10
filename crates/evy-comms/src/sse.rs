@@ -98,6 +98,12 @@ pub fn into_sse_response(
     rx: broadcast::Receiver<DaemonEvent>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let stream = BroadcastStream::new(rx).filter_map(|item| match item {
+        // `DashboardFrame` is a pre-formatted NAMED SSE event (absorbed from
+        // the v3 BFF): emit `event: <event>\ndata: <data>` verbatim rather than
+        // the default-event `{type,...}` shape the monitoring variants use.
+        Ok(DaemonEvent::DashboardFrame { event, data }) => {
+            Some(Ok(Event::default().event(event).data(data)))
+        }
         Ok(ev) => match Event::default().json_data(&ev) {
             Ok(frame) => Some(Ok(frame)),
             Err(e) => {

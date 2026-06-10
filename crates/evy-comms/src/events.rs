@@ -12,6 +12,7 @@ use chrono::{DateTime, Utc};
 use evy_core::{MandateId, ProviderKind, WorkerId, WorkerStatus};
 use evy_scheduler::{JobId, RunOutcome};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use uuid::Uuid;
 
 /// One observable event emitted by the Evy v4 daemon.
@@ -92,6 +93,82 @@ pub enum DaemonEvent {
         /// internal error). Independent of `finding_count`.
         healthy: bool,
     },
+
+    /// A pre-formatted NAMED SSE frame for the dashboard chat tab, absorbed
+    /// from the v3 BFF (`dashboard/lib/v4-bridge.ts`).
+    ///
+    /// Unlike the monitoring variants above — delivered on the default SSE
+    /// event as `data:{ "type": ..., ... }` — a `DashboardFrame` is delivered
+    /// as `event: <event>\ndata: <data>`, the exact vocabulary
+    /// `dashboard/public/tabs/chat.js` listens for: streaming chat tokens
+    /// (`message_update` → `{assistantMessageEvent:{type:"text_delta",delta}}`),
+    /// the turn terminator (`message_end`), and the transcript-mutation pings
+    /// (`transcript_compacted` / `transcript_cleared`). [`crate::sse`]'s
+    /// `into_sse_response` special-cases this variant; construct it with the
+    /// `dashboard_*` helpers so the wire shape stays centralised.
+    DashboardFrame {
+        /// SSE event name (e.g. `"message_update"`).
+        event: String,
+        /// Pre-encoded JSON payload string (e.g. `"{}"`).
+        data: String,
+    },
+}
+
+impl DaemonEvent {
+    /// `event: message_start` — the BFF emits this before the first token.
+    /// The chat tab lazy-creates the reply bubble on the first `text_delta`,
+    /// so this carries no payload; it's emitted for BFF parity.
+    #[must_use]
+    pub(crate) fn dashboard_message_start() -> Self {
+        Self::DashboardFrame {
+            event: "message_start".to_string(),
+            data: "{}".to_string(),
+        }
+    }
+
+    /// `event: message_update` carrying one streamed token as a `text_delta`,
+    /// in the shape `chat.js` parses (`d.assistantMessageEvent.delta`). `delta`
+    /// is JSON-escaped via `serde_json`, so quotes/newlines are safe.
+    #[must_use]
+    pub(crate) fn dashboard_message_update(delta: &str) -> Self {
+        let data = json!({
+            "assistantMessageEvent": { "type": "text_delta", "delta": delta }
+        })
+        .to_string();
+        Self::DashboardFrame {
+            event: "message_update".to_string(),
+            data,
+        }
+    }
+
+    /// `event: message_end` — the turn terminator (finalises the bubble).
+    #[must_use]
+    pub(crate) fn dashboard_message_end() -> Self {
+        Self::DashboardFrame {
+            event: "message_end".to_string(),
+            data: "{}".to_string(),
+        }
+    }
+
+    /// `event: transcript_compacted` — the chat tab refreshes its transcript
+    /// view on this ping (chat.js).
+    #[must_use]
+    pub(crate) fn dashboard_transcript_compacted() -> Self {
+        Self::DashboardFrame {
+            event: "transcript_compacted".to_string(),
+            data: "{}".to_string(),
+        }
+    }
+
+    /// `event: transcript_cleared` — emitted on "New Chat" (clear). Mirrors the
+    /// BFF; the chat tab resets its own view client-side.
+    #[must_use]
+    pub(crate) fn dashboard_transcript_cleared() -> Self {
+        Self::DashboardFrame {
+            event: "transcript_cleared".to_string(),
+            data: "{}".to_string(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -180,5 +257,43 @@ mod tests {
         assert!(s.contains("\"type\":\"watchdog_tick\""));
         let back: DaemonEvent = serde_json::from_str(&s).unwrap();
         assert_eq!(back, ev);
+    }
+
+    #[test]
+    fn dashboard_frame_constructors_carry_the_chat_js_vocabulary() {
+        // Event names match the chat.js addEventListener set.
+        match DaemonEvent::dashboard_message_start() {
+            DaemonEvent::DashboardFrame { event, data } => {
+                assert_eq!(event, "message_start");
+                assert_eq!(data, "{}");
+            }
+            other => panic!("expected DashboardFrame, got {other:?}"),
+        }
+        match DaemonEvent::dashboard_message_end() {
+            DaemonEvent::DashboardFrame { event, .. } => assert_eq!(event, "message_end"),
+            other => panic!("expected DashboardFrame, got {other:?}"),
+        }
+        match DaemonEvent::dashboard_transcript_compacted() {
+            DaemonEvent::DashboardFrame { event, .. } => assert_eq!(event, "transcript_compacted"),
+            other => panic!("expected DashboardFrame, got {other:?}"),
+        }
+        match DaemonEvent::dashboard_transcript_cleared() {
+            DaemonEvent::DashboardFrame { event, .. } => assert_eq!(event, "transcript_cleared"),
+            other => panic!("expected DashboardFrame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dashboard_message_update_matches_bff_text_delta_shape_and_escapes() {
+        // The shape chat.js parses: d.assistantMessageEvent.{type,delta}.
+        let DaemonEvent::DashboardFrame { event, data } =
+            DaemonEvent::dashboard_message_update("hi \"there\"\nnext")
+        else {
+            panic!("expected DashboardFrame");
+        };
+        assert_eq!(event, "message_update");
+        let v: serde_json::Value = serde_json::from_str(&data).expect("data is valid JSON");
+        assert_eq!(v["assistantMessageEvent"]["type"], "text_delta");
+        assert_eq!(v["assistantMessageEvent"]["delta"], "hi \"there\"\nnext");
     }
 }

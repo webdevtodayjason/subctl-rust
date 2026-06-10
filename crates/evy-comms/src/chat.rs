@@ -78,6 +78,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 use uuid::Uuid;
 
+use crate::events::DaemonEvent;
 use crate::http::HttpState;
 
 /// JSON body the operator's chat client POSTs.
@@ -89,6 +90,40 @@ pub struct ChatRequest {
     pub session_id: Option<Uuid>,
     /// Operator text. Must be non-empty (trimmed).
     pub message: String,
+}
+
+/// The chat POST body — TWO dialects, discriminated by SHAPE (serde
+/// `untagged`, with the v4 variant tried first so a `message` field always
+/// wins):
+///
+/// * [`ChatRequest`] (`{message, session_id?}`) — the canonical v4 dialect the
+///   chat-tui and curl speak. Synchronous: the reply comes back on the POST
+///   response (or its SSE stream). UNCHANGED by Phase-3 slice 2.
+/// * [`UiChatRequest`] (`{text, source?, attachments?}`) — the dashboard chat
+///   tab's fire-and-listen dialect (absorbed from the v3 BFF
+///   `dashboard/lib/v4-bridge.ts`). The POST just acks `{ok:true}`; the reply
+///   streams onto the `/api/evy/events` bus as named frames.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum ChatRequestBody {
+    /// `{message, session_id?}` — canonical v4 dialect.
+    V4(ChatRequest),
+    /// `{text, source?, attachments?}` — dashboard chat-tab dialect.
+    Ui(UiChatRequest),
+}
+
+/// The dashboard chat tab's POST body (`dashboard/public/tabs/chat.js` ~2143:
+/// `{text, source, attachments}`). Only `text` is declared — `source` and
+/// `attachments` are deliberately NOT captured: serde ignores them (no
+/// `deny_unknown_fields`), which both drops attachments exactly as the BFF did
+/// (a documented deferral — native attachments would be out-of-scope
+/// gold-plating) and keeps the struct free of never-read fields. `text`'s
+/// presence is also what distinguishes this dialect from the v4 `{message}`
+/// one under the `untagged` match.
+#[derive(Debug, Deserialize)]
+pub(crate) struct UiChatRequest {
+    /// Operator text (required).
+    pub text: String,
 }
 
 /// JSON body returned on success.
@@ -282,12 +317,150 @@ fn wants_event_stream(headers: &HeaderMap) -> bool {
 pub(crate) async fn chat_handler(
     State(state): State<HttpState>,
     headers: HeaderMap,
-    Json(body): Json<ChatRequest>,
+    Json(body): Json<ChatRequestBody>,
 ) -> Response {
-    if wants_event_stream(&headers) {
-        chat_handler_streaming(state, body).await.into_response()
-    } else {
-        chat_handler_blocking(state, body).await.into_response()
+    match body {
+        // v4 dialect — byte-for-byte unchanged (chat-tui + curl depend on it).
+        ChatRequestBody::V4(req) => {
+            if wants_event_stream(&headers) {
+                chat_handler_streaming(state, req).await.into_response()
+            } else {
+                chat_handler_blocking(state, req).await.into_response()
+            }
+        }
+        // Dashboard chat-tab dialect — fire-and-forget onto the events bus.
+        ChatRequestBody::Ui(ui) => handle_ui_chat(state, ui).await,
+    }
+}
+
+/// Dashboard chat-tab turn (the v3 BFF's `handleV4Chat` browser path, absorbed
+/// natively). Validates the text, acks `{ok:true}` immediately, and drives the
+/// turn asynchronously — its tokens broadcast onto `/api/evy/events` as the
+/// named frames `dashboard/public/tabs/chat.js` renders. Attachments are
+/// dropped (deferred, matching the BFF).
+async fn handle_ui_chat(state: HttpState, ui: UiChatRequest) -> Response {
+    let text = ui.text.trim().to_string();
+    if text.is_empty() {
+        // BFF parity: empty text → 400 {ok:false,error:"empty message"}.
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "empty message" })),
+        )
+            .into_response();
+    }
+
+    // Fire-and-forget: the browser only checks `r.ok` and reads the reply off
+    // the events bus, never the POST body (v4-bridge.ts:7,238-247).
+    tokio::spawn(run_dashboard_turn(state, text));
+    (StatusCode::OK, Json(json!({ "ok": true }))).into_response()
+}
+
+/// Drive ONE dashboard chat turn and stream it onto the events bus as the
+/// v3-named frames (`message_start` → `message_update`* → `message_end`).
+/// Mirrors the BFF's `streamV4Turn`: uses/creates the shared current session,
+/// honours the `/plan` trigger, and on completion adopts the resulting session
+/// id so the next turn continues it (and session-less transcript/context/util
+/// resolve to it). Errors surface as a visible `⚠️` text-delta then
+/// `message_end`, exactly as the BFF rendered them.
+async fn run_dashboard_turn(state: HttpState, text: String) {
+    let broadcaster = state.broadcaster.clone();
+    broadcaster.emit(DaemonEvent::dashboard_message_start());
+
+    let Some(partner) = state.app.thinking_partner() else {
+        broadcaster.emit(DaemonEvent::dashboard_message_update(
+            "\n⚠️ thinking-partner is not configured for this daemon",
+        ));
+        broadcaster.emit(DaemonEvent::dashboard_message_end());
+        return;
+    };
+
+    let current = state.current_chat_session().map(|s| s.0);
+    let (chunk_tx, chunk_rx) = mpsc::channel::<StreamChunk>(64);
+
+    // Drive the partner on a separate task so we forward chunks concurrently.
+    let partner_drive = partner.clone();
+    let text_drive = text;
+    let drive: tokio::task::JoinHandle<std::result::Result<Uuid, ChatError>> =
+        tokio::spawn(async move {
+            let plan_topic = parse_plan_command(&text_drive).map(|t| t.trim().to_string());
+            let result = match (plan_topic, current) {
+                // `/plan <topic>` always opens a NEW planning session (the v4
+                // blocking handler does the same — session_id is ignored here).
+                (Some(topic), _) => {
+                    if topic.is_empty() {
+                        Err(ChatError::BadRequest {
+                            message: "usage: /plan <topic>".to_string(),
+                        })
+                    } else {
+                        partner_drive
+                            .stream_start_session(topic, &chunk_tx)
+                            .await
+                            .map(|id| id.0)
+                            .map_err(|e| map_thinking_error(e, None))
+                    }
+                }
+                // No current session → open a conversational one (default).
+                (None, None) => partner_drive
+                    .stream_start_conversation(text_drive, &chunk_tx)
+                    .await
+                    .map(|id| id.0)
+                    .map_err(|e| map_thinking_error(e, None)),
+                // Continue the current session.
+                (None, Some(raw)) => {
+                    let id = SessionId(raw);
+                    partner_drive
+                        .stream_send(id, text_drive, &chunk_tx)
+                        .await
+                        .map(|_| raw)
+                        .map_err(|e| map_thinking_error(e, Some(raw)))
+                }
+            };
+            drop(chunk_tx);
+            result
+        });
+
+    // Forward each streamed token as a `message_update`. SkillLoaded chunks
+    // have no chat-tab mapping (BFF `translateFrame` → null), so drop them.
+    let mut chunks = ReceiverStream::new(chunk_rx);
+    while let Some(chunk) = chunks.next().await {
+        if let StreamChunk::Token(content) = chunk {
+            broadcaster.emit(DaemonEvent::dashboard_message_update(&content));
+        }
+    }
+
+    match drive.await {
+        Ok(Ok(sid)) => {
+            // Persist before signalling end (a restart right after a turn keeps
+            // the exchange), then adopt the session as the current one.
+            partner.save_all().await;
+            state.set_chat_session(sid);
+            broadcaster.emit(DaemonEvent::dashboard_message_end());
+        }
+        Ok(Err(err)) => {
+            broadcaster.emit(DaemonEvent::dashboard_message_update(&format!(
+                "\n⚠️ {}",
+                chat_error_display(&err)
+            )));
+            broadcaster.emit(DaemonEvent::dashboard_message_end());
+        }
+        Err(join_err) => {
+            broadcaster.emit(DaemonEvent::dashboard_message_update(&format!(
+                "\n⚠️ partner task panicked: {join_err}"
+            )));
+            broadcaster.emit(DaemonEvent::dashboard_message_end());
+        }
+    }
+}
+
+/// Human-readable one-liner for an error delta on the chat bus.
+fn chat_error_display(err: &ChatError) -> String {
+    match err {
+        ChatError::BadRequest { message }
+        | ChatError::SessionClosed { message, .. }
+        | ChatError::Backend { message }
+        | ChatError::Unavailable { message }
+        | ChatError::Internal { message } => message.clone(),
+        ChatError::UnknownSession { session_id } => format!("unknown session {session_id}"),
     }
 }
 

@@ -26,7 +26,7 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use axum::{
@@ -40,8 +40,9 @@ use evy_core::{MandateId, ProviderKind, WorkerId, WorkerStatus};
 use evy_policy::Policy;
 use evy_scheduler::{JobAction, JobId};
 use evy_skills::SkillRegistry;
-use evy_thinking::ThinkingPartner;
+use evy_thinking::{SessionId, ThinkingPartner};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
@@ -446,6 +447,39 @@ pub(crate) struct HttpState {
     pub(crate) broadcaster: EventBroadcaster,
     pub(crate) app: Arc<dyn AppState>,
     pub(crate) version: &'static str,
+    /// The ONE "current dashboard chat session" — the v4-native equivalent of
+    /// the v3 BFF's `currentV4Session` (`dashboard/lib/v4-bridge.ts`). The
+    /// chat tab's stateless UI POSTs `/chat` and GETs `/transcript` without a
+    /// session id; this holder bridges that to v4's session model. Single
+    /// `Option<Uuid>` because the dashboard is a single-operator localhost
+    /// console. In-memory (resets on daemon restart), matching the BFF.
+    pub(crate) chat_session: Arc<Mutex<Option<Uuid>>>,
+}
+
+impl HttpState {
+    /// The current dashboard chat session, if one has been opened this run.
+    pub(crate) fn current_chat_session(&self) -> Option<SessionId> {
+        self.chat_session
+            .lock()
+            .ok()
+            .and_then(|g| *g)
+            .map(SessionId)
+    }
+
+    /// Adopt `id` as the current dashboard chat session (called when a UI turn
+    /// opens or continues one).
+    pub(crate) fn set_chat_session(&self, id: Uuid) {
+        if let Ok(mut g) = self.chat_session.lock() {
+            *g = Some(id);
+        }
+    }
+
+    /// Forget the current dashboard chat session ("New Chat" / clear).
+    pub(crate) fn reset_chat_session(&self) {
+        if let Ok(mut g) = self.chat_session.lock() {
+            *g = None;
+        }
+    }
 }
 
 /// Workspace version of `evy-comms`. The dashboard exposes this on
@@ -462,6 +496,7 @@ fn build_router(
         broadcaster,
         app,
         version: VERSION,
+        chat_session: Arc::new(Mutex::new(None)),
     };
 
     let cors = build_cors_layer(allow_origins)?;

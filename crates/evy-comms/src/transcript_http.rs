@@ -29,6 +29,7 @@ use evy_thinking::{Role, Session, SessionId};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use crate::events::DaemonEvent;
 use crate::http::HttpState;
 
 /// Fixed prompt overhead added on top of the transcript estimate. Mirrors the
@@ -41,13 +42,24 @@ const TARGET_TOKENS: u64 = 55_000;
 /// Default transcript page size when the client omits `?limit`.
 const DEFAULT_LIMIT: usize = 200;
 
-/// Resolve the session a transcript request refers to. With `?session_id`,
-/// look it up directly; without one, fall back to the most recently active
-/// session (the BFF injects the current id, but a bare request still works).
+/// Resolve the session a transcript request refers to. Resolution order
+/// (absorbed from the v3 BFF, which injected its held session id for the
+/// chat tab's session-less GETs — `dashboard/lib/v4-bridge.ts` `proxyV4*`):
+///
+/// 1. an explicit `?session_id` (highest priority — direct lookup);
+/// 2. the shared **current dashboard chat session** ([`HttpState`]'s holder),
+///    so a bare `/transcript` reflects the conversation the chat tab is in;
+/// 3. failing both, the most-recently-active session (pre-absorption
+///    fallback — keeps bare requests working before the first UI turn).
 async fn resolve_session(state: &HttpState, q: &HashMap<String, String>) -> Option<Session> {
     let partner = state.app.thinking_partner()?;
     if let Some(sid) = q.get("session_id").and_then(|s| Uuid::parse_str(s).ok()) {
         return partner.session(SessionId(sid)).await.ok().flatten();
+    }
+    if let Some(current) = state.current_chat_session() {
+        if let Ok(Some(session)) = partner.session(current).await {
+            return Some(session);
+        }
     }
     let mut sessions = partner.list_sessions().await.ok()?;
     sessions.sort_by_key(|s| s.last_activity);
@@ -225,12 +237,19 @@ pub(crate) async fn compact_handler(
         return Json(json!({ "ok": true, "archived_count": 0, "kept_msgs": 0, "noop": true }));
     };
     match partner.compact_session(session.id, keep_recent).await {
-        Some((archived, kept)) => Json(json!({
-            "ok": true,
-            "archived_count": archived,
-            "kept_msgs": kept,
-            "noop": archived == 0,
-        })),
+        Some((archived, kept)) => {
+            // Ping the chat tab so it refreshes its transcript view (the BFF
+            // broadcast `transcript_compacted`; chat.js listens for it).
+            state
+                .broadcaster
+                .emit(DaemonEvent::dashboard_transcript_compacted());
+            Json(json!({
+                "ok": true,
+                "archived_count": archived,
+                "kept_msgs": kept,
+                "noop": archived == 0,
+            }))
+        }
         None => Json(json!({ "ok": true, "archived_count": 0, "kept_msgs": 0, "noop": true })),
     }
 }
@@ -246,9 +265,22 @@ pub(crate) async fn clear_handler(
         return Json(json!({ "ok": false, "error": "thinking-partner not configured" }));
     };
     let Some(session) = resolve_session(&state, &q).await else {
+        // Nothing to clear, but "New Chat" must still drop any held session so
+        // the next turn starts fresh (the BFF's `resetV4Session` is
+        // unconditional).
+        state.reset_chat_session();
+        state
+            .broadcaster
+            .emit(DaemonEvent::dashboard_transcript_cleared());
         return Json(json!({ "ok": true, "archive": Value::Null }));
     };
     let archive = partner.clear_session(session.id).await;
+    // "New Chat" — forget the current session and ping the bus (BFF parity:
+    // `resetV4Session` + broadcast `transcript_cleared`).
+    state.reset_chat_session();
+    state
+        .broadcaster
+        .emit(DaemonEvent::dashboard_transcript_cleared());
     Json(json!({
         "ok": true,
         "archive": archive.map(|p| p.display().to_string()),
