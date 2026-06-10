@@ -28,8 +28,16 @@ use tokio_tungstenite::tungstenite::protocol::Message as TgMsg;
 
 /// Hop-by-hop headers (RFC 7230 §6.1) + host — never forwarded across a proxy hop.
 const HOP_BY_HOP: &[&str] = &[
-    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-    "te", "trailers", "transfer-encoding", "upgrade", "host", "content-length",
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailers",
+    "transfer-encoding",
+    "upgrade",
+    "host",
+    "content-length",
 ];
 
 fn upstream_base() -> String {
@@ -47,7 +55,9 @@ fn client() -> &'static reqwest::Client {
 }
 
 fn is_hop_by_hop(name: &HeaderName) -> bool {
-    HOP_BY_HOP.iter().any(|h| name.as_str().eq_ignore_ascii_case(h))
+    HOP_BY_HOP
+        .iter()
+        .any(|h| name.as_str().eq_ignore_ascii_case(h))
 }
 
 /// Catch-all for any `/api/*` not matched by a native route → forward to Bun.
@@ -105,7 +115,11 @@ pub(crate) async fn reverse_proxy_handler(req: Request) -> Response {
 }
 
 fn bad_gateway(msg: &str) -> Response {
-    (StatusCode::BAD_GATEWAY, Json(json!({ "ok": false, "error": msg }))).into_response()
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(json!({ "ok": false, "error": msg })),
+    )
+        .into_response()
 }
 
 /// `GET /api/host` — native. Removes one proxy dependency immediately. Returns

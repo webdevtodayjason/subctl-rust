@@ -113,7 +113,11 @@ pub(crate) async fn transcript_handler(
 
     let (msgs, _chars) = visible_messages(&session);
     let total = msgs.len();
-    let tail = if msgs.len() > limit { &msgs[msgs.len() - limit..] } else { &msgs[..] };
+    let tail = if msgs.len() > limit {
+        &msgs[msgs.len() - limit..]
+    } else {
+        &msgs[..]
+    };
 
     let messages: Vec<Value> = tail
         .iter()

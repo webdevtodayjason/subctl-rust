@@ -282,7 +282,10 @@ mod tests {
             cfg_dir: format!("/cfg/{alias}"),
             ok,
             usage: util.map(|u| UsageEntry {
-                seven_day: Some(UsageWindow { utilization: Some(u), resets_at: None }),
+                seven_day: Some(UsageWindow {
+                    utilization: Some(u),
+                    resets_at: None,
+                }),
                 ..Default::default()
             }),
             error: err.map(String::from),
@@ -323,7 +326,17 @@ mod tests {
         assert!(!out2[0].ok);
         assert_eq!(out2[0].stale, Some(true));
         assert_eq!(out2[0].stale_age_ms, Some(3000));
-        assert_eq!(out2[0].usage.as_ref().unwrap().seven_day.as_ref().unwrap().utilization, Some(42.0));
+        assert_eq!(
+            out2[0]
+                .usage
+                .as_ref()
+                .unwrap()
+                .seven_day
+                .as_ref()
+                .unwrap()
+                .utilization,
+            Some(42.0)
+        );
     }
 
     #[test]

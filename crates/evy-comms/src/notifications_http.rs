@@ -263,7 +263,10 @@ pub fn emit(input: EmitNotificationInput) -> Notification {
 /// Unread count of the process-global ring (tray badge helper).
 #[must_use]
 pub fn unread_count() -> usize {
-    ring().lock().expect("notification ring mutex").unread_count()
+    ring()
+        .lock()
+        .expect("notification ring mutex")
+        .unread_count()
 }
 
 /// Query params for `GET /api/evy/notifications`.
@@ -286,13 +289,19 @@ pub(crate) async fn list_handler(Query(q): Query<ListQuery>) -> Json<Value> {
 
 /// `POST /api/evy/notifications/{id}/read` → `{ ok, found }`.
 pub(crate) async fn mark_read_handler(AxPath(id): AxPath<String>) -> Json<Value> {
-    let found = ring().lock().expect("notification ring mutex").mark_read(&id);
+    let found = ring()
+        .lock()
+        .expect("notification ring mutex")
+        .mark_read(&id);
     Json(json!({ "ok": true, "found": found }))
 }
 
 /// `POST /api/evy/notifications/read-all` → `{ ok, marked }`.
 pub(crate) async fn read_all_handler() -> Json<Value> {
-    let marked = ring().lock().expect("notification ring mutex").mark_all_read();
+    let marked = ring()
+        .lock()
+        .expect("notification ring mutex")
+        .mark_all_read();
     Json(json!({ "ok": true, "marked": marked }))
 }
 
@@ -413,7 +422,10 @@ mod tests {
         }
         assert_eq!(r.list(None, Some(RING_LIMIT)).len(), RING_LIMIT);
         // Newest survives, oldest dropped.
-        assert_eq!(r.list(None, Some(1))[0].title, format!("n{}", RING_LIMIT + 24));
+        assert_eq!(
+            r.list(None, Some(1))[0].title,
+            format!("n{}", RING_LIMIT + 24)
+        );
     }
 
     #[test]

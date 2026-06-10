@@ -30,7 +30,12 @@ pub async fn dispatch_and_register(
     let provider_kind = provider.kind();
     let mandate_id = handle.mandate_id();
 
-    registry.register(WorkerRecord::running(worker_id, provider_kind, mandate_id, now_ms));
+    registry.register(WorkerRecord::running(
+        worker_id,
+        provider_kind,
+        mandate_id,
+        now_ms,
+    ));
     broadcaster.emit(DaemonEvent::WorkerRegistered {
         worker_id,
         provider: provider_kind,
@@ -43,9 +48,7 @@ pub async fn dispatch_and_register(
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use evy_core::{
-        MandateId, PolicyMode, ProviderKind, WorkerHandle, WorkerStatus,
-    };
+    use evy_core::{MandateId, PolicyMode, ProviderKind, WorkerHandle, WorkerStatus};
     use std::collections::HashMap;
 
     struct MockHandle {
@@ -125,7 +128,11 @@ mod tests {
 
         // WorkerRegistered emitted with the same id.
         match rx.try_recv().expect("event emitted") {
-            DaemonEvent::WorkerRegistered { worker_id, provider, mandate_id } => {
+            DaemonEvent::WorkerRegistered {
+                worker_id,
+                provider,
+                mandate_id,
+            } => {
                 assert_eq!(worker_id, id);
                 assert_eq!(provider, ProviderKind::ClaudeCode);
                 assert_eq!(mandate_id, mandate.id);
@@ -154,7 +161,14 @@ mod tests {
         }
         let registry = WorkerRegistry::new();
         let broadcaster = EventBroadcaster::default();
-        let res = dispatch_and_register(&FailProvider, &test_mandate(), &registry, &broadcaster, 1000).await;
+        let res = dispatch_and_register(
+            &FailProvider,
+            &test_mandate(),
+            &registry,
+            &broadcaster,
+            1000,
+        )
+        .await;
         assert!(res.is_err());
         assert_eq!(registry.len(), 0); // nothing registered on dispatch failure
     }

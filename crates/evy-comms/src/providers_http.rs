@@ -112,7 +112,10 @@ fn lm_token() -> Option<String> {
     }
     let text = std::fs::read_to_string(secrets_path()).ok()?;
     let json: Value = serde_json::from_str(&text).ok()?;
-    let v = json.get("lmstudio_api_token").and_then(Value::as_str)?.trim();
+    let v = json
+        .get("lmstudio_api_token")
+        .and_then(Value::as_str)?
+        .trim();
     if v.is_empty() || v.starts_with("op://") {
         return None;
     }
@@ -348,7 +351,12 @@ fn do_post_profile(
     body: &Value,
     known_providers: Option<&HashSet<String>>,
 ) -> CrudResult {
-    let get_str = |k: &str| body.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+    let get_str = |k: &str| {
+        body.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
     let alias = get_str("alias");
     let provider = get_str("provider");
     let email = get_str("email");
@@ -393,7 +401,9 @@ fn do_post_profile(
     // byte-identical to what the Bun dashboard writes.
     let new_row =
         format!("{alias:<15} | {provider:<7} | {email:<32} | {config_dir:<25} | {description}");
-    let existing = lines.iter().position(|l| row_alias(l) == Some(alias.as_str()));
+    let existing = lines
+        .iter()
+        .position(|l| row_alias(l) == Some(alias.as_str()));
 
     if mode == "edit" {
         match existing {
@@ -494,7 +504,10 @@ pub(crate) async fn models_refresh_handler() -> Response {
 }
 
 /// `POST /api/providers/profiles` — add or edit an `accounts.conf` row.
-pub(crate) async fn profiles_post_handler(State(state): State<HttpState>, body: String) -> Response {
+pub(crate) async fn profiles_post_handler(
+    State(state): State<HttpState>,
+    body: String,
+) -> Response {
     let Ok(parsed) = serde_json::from_str::<Value>(&body) else {
         return (
             StatusCode::BAD_REQUEST,
@@ -503,7 +516,11 @@ pub(crate) async fn profiles_post_handler(State(state): State<HttpState>, body: 
             .into_response();
     };
     let ids = state.app.provider_catalog().map(|c| c.provider_ids);
-    resp(do_post_profile(&accounts_conf_path(), &parsed, ids.as_ref()))
+    resp(do_post_profile(
+        &accounts_conf_path(),
+        &parsed,
+        ids.as_ref(),
+    ))
 }
 
 /// `DELETE /api/providers/profiles` — remove an `accounts.conf` row by alias.
@@ -515,7 +532,10 @@ pub(crate) async fn profiles_delete_handler(body: String) -> Response {
         )
             .into_response();
     };
-    let alias = parsed.get("alias").and_then(Value::as_str).unwrap_or_default();
+    let alias = parsed
+        .get("alias")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     resp(do_delete_profile(&accounts_conf_path(), alias))
 }
 
@@ -600,7 +620,10 @@ mod tests {
             .respond_with(wiremock::ResponseTemplate::new(401))
             .mount(&server)
             .await;
-        let err = get_lmstudio_models(&server.uri(), false).await.err().unwrap();
+        let err = get_lmstudio_models(&server.uri(), false)
+            .await
+            .err()
+            .unwrap();
         assert!(matches!(err, LmError::Http(401)));
     }
 
@@ -628,8 +651,13 @@ mod tests {
 
     #[tokio::test]
     async fn error_401_without_token_is_missing_token() {
-        let (status, body) =
-            body_of(lm_error_response(LmError::Http(401), "http://h", false, false)).await;
+        let (status, body) = body_of(lm_error_response(
+            LmError::Http(401),
+            "http://h",
+            false,
+            false,
+        ))
+        .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(body["kind"], "missing_token");
         assert_eq!(body["host"], "http://h");
@@ -650,8 +678,13 @@ mod tests {
         assert_eq!(s1, StatusCode::BAD_GATEWAY);
         assert_eq!(b1["kind"], "http_error");
         assert_eq!(b1["error"], "HTTP 503");
-        let (s2, b2) =
-            body_of(lm_error_response(LmError::Unreachable("boom".into()), "h", false, false)).await;
+        let (s2, b2) = body_of(lm_error_response(
+            LmError::Unreachable("boom".into()),
+            "h",
+            false,
+            false,
+        ))
+        .await;
         assert_eq!(s2, StatusCode::BAD_GATEWAY);
         assert_eq!(b2["kind"], "unreachable");
         assert_eq!(b2["error"], "boom");
@@ -712,7 +745,13 @@ mod tests {
         do_post_profile(&path, &edit, None).unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(written.contains("openai"));
-        assert_eq!(written.lines().filter(|l| row_alias(l) == Some("a")).count(), 1);
+        assert_eq!(
+            written
+                .lines()
+                .filter(|l| row_alias(l) == Some("a"))
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -722,7 +761,8 @@ mod tests {
         let (s, _) = do_post_profile(&path, &json!({ "alias": "a" }), None).unwrap_err();
         assert_eq!(s, StatusCode::BAD_REQUEST);
         // bad alias → 400
-        let bad = json!({ "alias": "a b", "provider": "anthropic", "email": "e", "config_dir": "d" });
+        let bad =
+            json!({ "alias": "a b", "provider": "anthropic", "email": "e", "config_dir": "d" });
         let (s, _) = do_post_profile(&path, &bad, None).unwrap_err();
         assert_eq!(s, StatusCode::BAD_REQUEST);
         // provider not in known set → 400 (write-gate strict when Some)
@@ -738,7 +778,11 @@ mod tests {
     #[test]
     fn delete_profile_removes_row_preserves_comments_and_404s() {
         let path = tmpdir().join("accounts.conf");
-        std::fs::write(&path, "# header\na | anthropic | e | d | \nb | openai | e | d | ").unwrap();
+        std::fs::write(
+            &path,
+            "# header\na | anthropic | e | d | \nb | openai | e | d | ",
+        )
+        .unwrap();
         let ok = do_delete_profile(&path, "a").unwrap();
         assert_eq!(ok["ok"], true);
         let after = std::fs::read_to_string(&path).unwrap();

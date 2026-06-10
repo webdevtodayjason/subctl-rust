@@ -159,7 +159,10 @@ async fn profiles_post_then_delete_round_trip() {
 
     // Delete it.
     let del = client
-        .request(reqwest::Method::DELETE, format!("{base}/api/providers/profiles"))
+        .request(
+            reqwest::Method::DELETE,
+            format!("{base}/api/providers/profiles"),
+        )
         .json(&json!({ "alias": "claude-it" }))
         .send()
         .await

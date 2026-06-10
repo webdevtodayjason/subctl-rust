@@ -91,34 +91,75 @@ pub fn compute_account_verdict(a: &AccountVerdictInput) -> AccountVerdict {
 
     if let Some(wkly) = a.seven_day_util {
         if wkly >= THRESH_7D_RED {
-            bump(Verdict::Red, &mut reasons, format!("weekly {}% (red ≥{}%)", js_num(wkly), js_num(THRESH_7D_RED)));
+            bump(
+                Verdict::Red,
+                &mut reasons,
+                format!("weekly {}% (red ≥{}%)", js_num(wkly), js_num(THRESH_7D_RED)),
+            );
         } else if wkly >= THRESH_7D_YELLOW {
-            bump(Verdict::Yellow, &mut reasons, format!("weekly {}%", js_num(wkly)));
+            bump(
+                Verdict::Yellow,
+                &mut reasons,
+                format!("weekly {}%", js_num(wkly)),
+            );
         }
     }
 
     if let Some(sess) = a.five_hour_util {
         if sess >= THRESH_5H_RED {
-            bump(Verdict::Red, &mut reasons, format!("5h {}% (red ≥{}%)", js_num(sess), js_num(THRESH_5H_RED)));
+            bump(
+                Verdict::Red,
+                &mut reasons,
+                format!("5h {}% (red ≥{}%)", js_num(sess), js_num(THRESH_5H_RED)),
+            );
         } else if sess >= THRESH_5H_YELLOW {
-            bump(Verdict::Yellow, &mut reasons, format!("5h {}%", js_num(sess)));
+            bump(
+                Verdict::Yellow,
+                &mut reasons,
+                format!("5h {}%", js_num(sess)),
+            );
         }
     }
 
     if a.recent_429 >= 3 {
-        bump(Verdict::Red, &mut reasons, format!("{} RL hits today", a.recent_429));
+        bump(
+            Verdict::Red,
+            &mut reasons,
+            format!("{} RL hits today", a.recent_429),
+        );
     } else if a.recent_429 >= 1 {
         let plural = if a.recent_429 == 1 { "" } else { "s" };
-        bump(Verdict::Yellow, &mut reasons, format!("{} RL hit{} today", a.recent_429, plural));
+        bump(
+            Verdict::Yellow,
+            &mut reasons,
+            format!("{} RL hit{} today", a.recent_429, plural),
+        );
     }
 
     if a.parallel_on_account >= 5 {
-        bump(Verdict::Red, &mut reasons, format!("{} parallel sessions on this account", a.parallel_on_account));
+        bump(
+            Verdict::Red,
+            &mut reasons,
+            format!(
+                "{} parallel sessions on this account",
+                a.parallel_on_account
+            ),
+        );
     } else if a.parallel_on_account >= 3 {
-        bump(Verdict::Yellow, &mut reasons, format!("{} parallel sessions on this account", a.parallel_on_account));
+        bump(
+            Verdict::Yellow,
+            &mut reasons,
+            format!(
+                "{} parallel sessions on this account",
+                a.parallel_on_account
+            ),
+        );
     }
 
-    AccountVerdict { verdict: level, reasons }
+    AccountVerdict {
+        verdict: level,
+        reasons,
+    }
 }
 
 /// Severity ordering for the global dispatch best-of (green<yellow<red).
@@ -171,7 +212,10 @@ pub fn dispatch_verdict(accounts: &[(String, AccountVerdict)]) -> AccountVerdict
             }
         })
         .collect();
-    AccountVerdict { verdict: best, reasons }
+    AccountVerdict {
+        verdict: best,
+        reasons,
+    }
 }
 
 // ─── slice 1b: per-account auth status (ported from v3 authStatus) ────────────
@@ -248,7 +292,10 @@ mod tests {
 
     #[test]
     fn unauthenticated_is_red() {
-        let v = compute_account_verdict(&AccountVerdictInput { auth_ready: false, ..input() });
+        let v = compute_account_verdict(&AccountVerdictInput {
+            auth_ready: false,
+            ..input()
+        });
         assert_eq!(v.verdict, Verdict::Red);
         assert_eq!(v.reasons, vec!["account not authenticated"]);
     }
@@ -263,35 +310,107 @@ mod tests {
     #[test]
     fn weekly_thresholds() {
         // boundary: <70 green, 70..90 yellow, >=90 red
-        assert_eq!(compute_account_verdict(&AccountVerdictInput { seven_day_util: Some(69.0), ..input() }).verdict, Verdict::Green);
-        assert_eq!(compute_account_verdict(&AccountVerdictInput { seven_day_util: Some(70.0), ..input() }).verdict, Verdict::Yellow);
-        assert_eq!(compute_account_verdict(&AccountVerdictInput { seven_day_util: Some(89.0), ..input() }).verdict, Verdict::Yellow);
-        assert_eq!(compute_account_verdict(&AccountVerdictInput { seven_day_util: Some(90.0), ..input() }).verdict, Verdict::Red);
+        assert_eq!(
+            compute_account_verdict(&AccountVerdictInput {
+                seven_day_util: Some(69.0),
+                ..input()
+            })
+            .verdict,
+            Verdict::Green
+        );
+        assert_eq!(
+            compute_account_verdict(&AccountVerdictInput {
+                seven_day_util: Some(70.0),
+                ..input()
+            })
+            .verdict,
+            Verdict::Yellow
+        );
+        assert_eq!(
+            compute_account_verdict(&AccountVerdictInput {
+                seven_day_util: Some(89.0),
+                ..input()
+            })
+            .verdict,
+            Verdict::Yellow
+        );
+        assert_eq!(
+            compute_account_verdict(&AccountVerdictInput {
+                seven_day_util: Some(90.0),
+                ..input()
+            })
+            .verdict,
+            Verdict::Red
+        );
     }
 
     #[test]
     fn five_hour_thresholds() {
-        assert_eq!(compute_account_verdict(&AccountVerdictInput { five_hour_util: Some(79.0), ..input() }).verdict, Verdict::Green);
-        assert_eq!(compute_account_verdict(&AccountVerdictInput { five_hour_util: Some(80.0), ..input() }).verdict, Verdict::Yellow);
-        assert_eq!(compute_account_verdict(&AccountVerdictInput { five_hour_util: Some(95.0), ..input() }).verdict, Verdict::Red);
+        assert_eq!(
+            compute_account_verdict(&AccountVerdictInput {
+                five_hour_util: Some(79.0),
+                ..input()
+            })
+            .verdict,
+            Verdict::Green
+        );
+        assert_eq!(
+            compute_account_verdict(&AccountVerdictInput {
+                five_hour_util: Some(80.0),
+                ..input()
+            })
+            .verdict,
+            Verdict::Yellow
+        );
+        assert_eq!(
+            compute_account_verdict(&AccountVerdictInput {
+                five_hour_util: Some(95.0),
+                ..input()
+            })
+            .verdict,
+            Verdict::Red
+        );
     }
 
     #[test]
     fn rl_hits_singular_plural_and_levels() {
-        let one = compute_account_verdict(&AccountVerdictInput { recent_429: 1, ..input() });
+        let one = compute_account_verdict(&AccountVerdictInput {
+            recent_429: 1,
+            ..input()
+        });
         assert_eq!(one.verdict, Verdict::Yellow);
         assert_eq!(one.reasons, vec!["1 RL hit today"]);
-        let two = compute_account_verdict(&AccountVerdictInput { recent_429: 2, ..input() });
+        let two = compute_account_verdict(&AccountVerdictInput {
+            recent_429: 2,
+            ..input()
+        });
         assert_eq!(two.reasons, vec!["2 RL hits today"]);
-        let three = compute_account_verdict(&AccountVerdictInput { recent_429: 3, ..input() });
+        let three = compute_account_verdict(&AccountVerdictInput {
+            recent_429: 3,
+            ..input()
+        });
         assert_eq!(three.verdict, Verdict::Red);
         assert_eq!(three.reasons, vec!["3 RL hits today"]);
     }
 
     #[test]
     fn parallel_sessions_levels() {
-        assert_eq!(compute_account_verdict(&AccountVerdictInput { parallel_on_account: 3, ..input() }).verdict, Verdict::Yellow);
-        assert_eq!(compute_account_verdict(&AccountVerdictInput { parallel_on_account: 5, ..input() }).verdict, Verdict::Red);
+        assert_eq!(
+            compute_account_verdict(&AccountVerdictInput {
+                parallel_on_account: 3,
+                ..input()
+            })
+            .verdict,
+            Verdict::Yellow
+        );
+        assert_eq!(
+            compute_account_verdict(&AccountVerdictInput {
+                parallel_on_account: 5,
+                ..input()
+            })
+            .verdict,
+            Verdict::Red
+        );
     }
 
     #[test]
@@ -344,7 +463,10 @@ mod tests {
     }
 
     fn av(v: Verdict, reasons: &[&str]) -> AccountVerdict {
-        AccountVerdict { verdict: v, reasons: reasons.iter().map(|s| s.to_string()).collect() }
+        AccountVerdict {
+            verdict: v,
+            reasons: reasons.iter().map(|s| s.to_string()).collect(),
+        }
     }
 
     #[test]
@@ -358,7 +480,10 @@ mod tests {
     fn dispatch_is_best_of_severity_not_lowest_util() {
         // A: red (5 parallel) but would be "lowest util"; B: green. Severity-best-of → green.
         let d = dispatch_verdict(&[
-            ("acctA".to_string(), av(Verdict::Red, &["5 parallel sessions on this account"])),
+            (
+                "acctA".to_string(),
+                av(Verdict::Red, &["5 parallel sessions on this account"]),
+            ),
             ("acctB".to_string(), av(Verdict::Green, &[])),
         ]);
         assert_eq!(d.verdict, Verdict::Green); // not red — proves severity best-of
@@ -368,15 +493,21 @@ mod tests {
     fn dispatch_reasons_format() {
         let d = dispatch_verdict(&[
             ("claude-jason".to_string(), av(Verdict::Green, &[])),
-            ("claude-titanium".to_string(), av(Verdict::Yellow, &["weekly 72%"])),
+            (
+                "claude-titanium".to_string(),
+                av(Verdict::Yellow, &["weekly 72%"]),
+            ),
             ("claude-semfreak".to_string(), av(Verdict::Red, &[])),
         ]);
         assert_eq!(d.verdict, Verdict::Green); // jason green wins
-        assert_eq!(d.reasons, vec![
-            "claude-jason: GO",
-            "claude-titanium: YELLOW — weekly 72%",
-            "claude-semfreak: RED",
-        ]);
+        assert_eq!(
+            d.reasons,
+            vec![
+                "claude-jason: GO",
+                "claude-titanium: YELLOW — weekly 72%",
+                "claude-semfreak: RED",
+            ]
+        );
     }
 
     #[test]

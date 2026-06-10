@@ -490,9 +490,10 @@ async fn notify_with_bridge_sends_and_returns_ok() {
     let tg = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
         .and(wiremock::matchers::path("/botTESTTOKEN/sendMessage"))
-        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
-            serde_json::json!({ "ok": true, "result": { "message_id": 7 } }),
-        ))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "ok": true, "result": { "message_id": 7 } })),
+        )
         .expect(1)
         .mount(&tg)
         .await;
@@ -517,9 +518,10 @@ async fn ask_with_no_reply_returns_504() {
     let tg = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
         .and(wiremock::matchers::path("/botTESTTOKEN/sendMessage"))
-        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
-            serde_json::json!({ "ok": true, "result": { "message_id": 8 } }),
-        ))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "ok": true, "result": { "message_id": 8 } })),
+        )
         .mount(&tg)
         .await;
 
