@@ -93,6 +93,10 @@ pub mod rate_limits;
 pub mod accounts_http;
 // ── Cutover Phase 2 slice 2m: team-template CRUD ──
 pub mod teams_http;
+// ── v4-native operator notification tray (port of notifications.ts) ──
+pub mod notifications_http;
+// ── v4-native chat attachments (port of attachments.ts) ──
+pub mod attachments_http;
 
 // ── Public re-exports — the surface the daemon binary consumes ───────
 

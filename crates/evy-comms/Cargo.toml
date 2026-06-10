@@ -45,6 +45,10 @@ chrono = { version = "0.4", default-features = false, features = [
     "serde",
 ] }
 uuid = { workspace = true }
+# Attachment content-addressing: sha256(bytes) → hex, matching v3's
+# `createHash("sha256")`. Both are already vendored as workspace deps.
+sha2 = { workspace = true }
+hex = { workspace = true }
 
 # Streams used inside SSE handlers.
 futures = "0.3"
