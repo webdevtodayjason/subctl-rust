@@ -699,11 +699,25 @@ fn build_router(
         )
         .route(
             "/api/settings/obsidian",
-            get(crate::preferences_http::obsidian_get_handler),
+            get(crate::preferences_http::obsidian_get_handler)
+                .post(crate::preferences_http::obsidian_write_handler),
         )
         .route(
             "/api/settings/config/{name}",
             get(crate::preferences_http::config_get_handler),
+        )
+        // W2 mutation parity — native settings writes (registered before the
+        // `/api/{*rest}` catch-all so they win over the v3 reverse-proxy).
+        // obsidian: same-owner write of the file the GET serves. telegram:
+        // writes `[comms.telegram]` in config.toml (restart-required). test:
+        // sends a live message through the bridge. See `preferences_http` docs.
+        .route(
+            "/api/settings/telegram",
+            post(crate::preferences_http::telegram_write_handler),
+        )
+        .route(
+            "/api/settings/telegram/test",
+            post(crate::preferences_http::telegram_test_handler),
         )
         // /api/terminal/attach (ADR 0011 Layer 2) — the web-terminal WS attach.
         // Like /api/live it can't ride the reqwest reverse-proxy (no upgrade

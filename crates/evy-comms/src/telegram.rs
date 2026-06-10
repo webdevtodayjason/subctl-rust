@@ -169,6 +169,14 @@ impl TelegramBridge {
         }
     }
 
+    /// The chat id this bridge is configured to target. Surfaced in the
+    /// `POST /api/settings/telegram/test` response so the operator can confirm
+    /// which chat the live bridge would message.
+    #[must_use]
+    pub fn chat_id(&self) -> i64 {
+        self.inner.config.chat_id
+    }
+
     /// Send a [`Notification`] to the configured chat.
     ///
     /// # Errors
