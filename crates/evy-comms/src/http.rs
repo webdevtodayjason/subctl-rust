@@ -714,6 +714,15 @@ fn build_router(
             "/api/update/check",
             get(crate::preferences_http::update_check_handler),
         )
+        // /api/terminal/attach (ADR 0011 Layer 2) — the web-terminal WS attach.
+        // Like /api/live it can't ride the reqwest reverse-proxy (no upgrade
+        // support); a dedicated tokio-tungstenite bridge dials Bun's terminal
+        // endpoint and splices frames. /enabled + /teams stay on the catch-all
+        // proxy (plain GETs). Specific route wins over the catch-all below.
+        .route(
+            "/api/terminal/attach",
+            get(crate::terminal_ws::terminal_attach_handler),
+        )
         .route("/api/{*rest}", any(crate::proxy_http::reverse_proxy_handler));
 
     // Phase 4 Slice A: optionally serve the operator-console static
