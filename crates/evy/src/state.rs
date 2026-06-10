@@ -72,6 +72,9 @@ pub struct DaemonAppState {
     /// `ChatResponse` so the operator can see which skills the model
     /// could see this turn.
     pub skills: Option<Arc<SkillRegistry>>,
+    /// Telegram bridge handle for the notify/ask HTTP surface
+    /// (criterion #6). `None` when `[comms.telegram]` is absent.
+    pub telegram: Option<evy_comms::TelegramBridge>,
     /// P2 — display label for the active supervisor model, surfaced in the
     /// `/api/evy/context` meter (e.g. `"lm-studio/gemma-4-26b-a4b-it-mlx"`).
     pub supervisor_label: Option<String>,
@@ -101,6 +104,7 @@ impl DaemonAppState {
             obs_log,
             thinking_partner: None,
             skills: None,
+            telegram: None,
             supervisor_label: None,
             worker_registry: WorkerRegistry::new(),
             broadcaster: EventBroadcaster::default(),
@@ -144,6 +148,14 @@ impl DaemonAppState {
     #[must_use]
     pub fn with_supervisor_label(mut self, label: String) -> Self {
         self.supervisor_label = Some(label);
+        self
+    }
+
+    /// Attach the Telegram bridge so `POST /api/evy/notify` and
+    /// `POST /api/evy/ask` reach the operator (criterion #6).
+    #[must_use]
+    pub fn with_telegram(mut self, bridge: evy_comms::TelegramBridge) -> Self {
+        self.telegram = Some(bridge);
         self
     }
 }
@@ -199,6 +211,10 @@ impl AppState for DaemonAppState {
 
     fn skills(&self) -> Option<Arc<SkillRegistry>> {
         self.skills.clone()
+    }
+
+    fn telegram_bridge(&self) -> Option<evy_comms::TelegramBridge> {
+        self.telegram.clone()
     }
 
     fn supervisor_label(&self) -> Option<String> {

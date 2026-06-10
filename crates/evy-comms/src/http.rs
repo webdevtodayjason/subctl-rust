@@ -145,6 +145,16 @@ pub trait AppState: Send + Sync + 'static {
         None
     }
 
+    /// Cutover criterion #6 — the daemon's Telegram bridge, if one is
+    /// configured. `POST /api/evy/notify` and `POST /api/evy/ask`
+    /// return 503 when this is `None`.
+    ///
+    /// Default impl returns `None` so existing implementations
+    /// (notably [`StubAppState`]) keep compiling without change.
+    fn telegram_bridge(&self) -> Option<crate::telegram::TelegramBridge> {
+        None
+    }
+
     /// P2 — display label for the active supervisor model
     /// (e.g. `"lm-studio/gemma-4-26b-a4b-it-mlx"`), surfaced in the
     /// `/api/evy/context` meter. Default `None` (renders as `null`); the
@@ -488,6 +498,8 @@ fn build_router(
         // Phase 1 — native /api/evy/accounts (accounts + auth + usage + verdict).
         .route("/api/evy/accounts", get(crate::accounts_http::accounts_handler))
         // Phase 2 (2j) — native worker spawn (criterion #1).
+        .route("/api/evy/notify", post(notify_handler))
+        .route("/api/evy/ask", post(ask_handler))
         .route("/api/evy/orchestration/spawn", post(spawn_handler))
         // Phase 2 (2l) — Orch panel: live worker list + kill.
         .route("/api/evy/orchestration", get(orchestration_list_handler))
@@ -604,6 +616,84 @@ async fn workers_handler(State(state): State<HttpState>) -> impl IntoResponse {
 
 /// `POST /api/evy/orchestration/spawn` (Phase 2 slice 2j) — spawn a worker on
 /// the named account; on success the registry (and `/api/evy/workers`) reflects it.
+/// Request body for `POST /api/evy/notify`.
+#[derive(Debug, Deserialize)]
+struct NotifyRequest {
+    /// Message text, sent to the operator verbatim.
+    text: String,
+}
+
+/// Request body for `POST /api/evy/ask`.
+#[derive(Debug, Deserialize)]
+struct AskRequest {
+    /// The question posted to the operator.
+    question: String,
+    /// How long to block waiting for the reply. Default 300s.
+    #[serde(default = "default_ask_timeout_s")]
+    timeout_s: u64,
+}
+
+const fn default_ask_timeout_s() -> u64 {
+    300
+}
+
+/// `POST /api/evy/notify` — push a free-text message to the operator
+/// over the configured Telegram bridge (criterion #6 outbound surface).
+async fn notify_handler(
+    State(state): State<HttpState>,
+    Json(req): Json<NotifyRequest>,
+) -> Response {
+    let Some(bridge) = state.app.telegram_bridge() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "ok": false, "error": "no telegram bridge configured" })),
+        )
+            .into_response();
+    };
+    match bridge
+        .notify(crate::notification::Notification::Note { text: req.text })
+        .await
+    {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /api/evy/ask` — post a question to the operator and block
+/// (bounded by `timeout_s`) for their Telegram reply (criterion #6
+/// "ask the operator" surface). The operator answers by replying to
+/// the question bubble.
+async fn ask_handler(State(state): State<HttpState>, Json(req): Json<AskRequest>) -> Response {
+    let Some(bridge) = state.app.telegram_bridge() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "ok": false, "error": "no telegram bridge configured" })),
+        )
+            .into_response();
+    };
+    let timeout = std::time::Duration::from_secs(req.timeout_s);
+    match bridge.ask(req.question, timeout).await {
+        Ok(reply) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "ok": true, "reply": reply })),
+        )
+            .into_response(),
+        // The bridge maps an expired ask to a timeout-flavoured error;
+        // surface every failure as 504 with the reason — callers treat
+        // "no answer" and "couldn't deliver" the same way (retry or
+        // escalate), and the body disambiguates.
+        Err(e) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 async fn spawn_handler(State(state): State<HttpState>, Json(req): Json<SpawnRequest>) -> Response {
     match state.app.spawn_worker(req).await {
         Ok(worker_id) => (

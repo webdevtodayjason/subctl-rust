@@ -491,7 +491,27 @@ pub async fn run_daemon_with_shutdown(
         tracing::info!("no [thinking_partner] in config; chat endpoint will return 503");
     }
 
+    // Optional Telegram bridge — constructed BEFORE the app state so the
+    // notify/ask HTTP surface (criterion #6) holds a handle. The clone
+    // moved into `run(token)` below is the long-lived poll loop.
+    let telegram_bridge = config.comms.telegram.clone().map(|tg| {
+        let bridge = TelegramBridge::new(tg.into(), ask_registry.clone());
+        tracing::info!("telegram bridge configured");
+        bridge
+    });
+
+    // Optional Discord bridge. Same shape as telegram — `run(token)`
+    // long-lived, `notify`/`ask` on the original handle.
+    let discord_bridge = config.comms.discord.clone().map(|dc| {
+        let bridge = DiscordBridge::new(dc.into(), ask_registry.clone());
+        tracing::info!("discord bridge configured");
+        bridge
+    });
+
     let mut app_state = DaemonAppState::new(scheduler.clone(), policy.clone(), obs_log.clone());
+    if let Some(bridge) = telegram_bridge.clone() {
+        app_state = app_state.with_telegram(bridge);
+    }
     if let Some(partner) = thinking_partner.clone() {
         app_state = app_state.with_thinking_partner(partner);
     }
@@ -526,22 +546,6 @@ pub async fn run_daemon_with_shutdown(
         // is fine; the daemon proceeds either way.
         let _ = tx.send(http_addr);
     }
-
-    // Optional Telegram bridge. `bridge.clone().run(token)` is the
-    // long-lived loop; the original handle stays for `notify` / `ask`.
-    let telegram_bridge = config.comms.telegram.clone().map(|tg| {
-        let bridge = TelegramBridge::new(tg.into(), ask_registry.clone());
-        tracing::info!("telegram bridge configured");
-        bridge
-    });
-
-    // Optional Discord bridge. Same shape as telegram — `run(token)`
-    // long-lived, `notify`/`ask` on the original handle.
-    let discord_bridge = config.comms.discord.clone().map(|dc| {
-        let bridge = DiscordBridge::new(dc.into(), ask_registry.clone());
-        tracing::info!("discord bridge configured");
-        bridge
-    });
 
     // ── 4. Boot-time event + observation ─────────────────────────────
     let provider_kinds: Vec<_> = providers.iter().map(|p| p.kind()).collect();

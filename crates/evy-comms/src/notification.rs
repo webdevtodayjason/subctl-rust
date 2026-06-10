@@ -64,6 +64,12 @@ pub enum Notification {
         /// Human-readable error message.
         message: String,
     },
+    /// Free-text operator note — the `POST /api/evy/notify` surface.
+    /// Rendered verbatim (no prefix) so callers fully own the message.
+    Note {
+        /// The message text, sent as-is.
+        text: String,
+    },
 }
 
 impl Notification {
@@ -97,6 +103,7 @@ impl Notification {
                 format!("✅ ask {id} resolved: {answer}", id = ask_id.0)
             }
             Self::Error { context, message } => format!("⚠️  {context}: {message}"),
+            Self::Note { text } => text.clone(),
         }
     }
 }

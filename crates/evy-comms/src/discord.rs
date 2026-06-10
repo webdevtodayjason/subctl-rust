@@ -263,6 +263,13 @@ pub fn render_embed(n: &Notification) -> Embed {
                 inline: false,
             }],
         },
+        Notification::Note { text } => Embed {
+            title: None,
+            description: Some(text.clone()),
+            color: Some(COLOR_NEUTRAL),
+            footer: None,
+            fields: vec![],
+        },
         Notification::Error { context, message } => Embed {
             title: Some(format!("⚠️  Error: {context}")),
             description: Some(message.clone()),

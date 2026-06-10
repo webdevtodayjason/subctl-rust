@@ -427,3 +427,114 @@ async fn missing_static_asset_yields_404() {
 
     shutdown.cancel();
 }
+
+// ── criterion #6 — POST /api/evy/notify + /api/evy/ask ────────────────────
+
+/// Stub state that carries a Telegram bridge, for the notify/ask routes.
+struct TelegramTestState(evy_comms::TelegramBridge);
+
+#[async_trait::async_trait]
+impl AppState for TelegramTestState {
+    async fn workers(&self) -> Vec<WorkerSummary> {
+        Vec::new()
+    }
+    async fn jobs(&self) -> Vec<JobSummary> {
+        Vec::new()
+    }
+    async fn policy(&self) -> evy_policy::Policy {
+        evy_policy::Policy::default()
+    }
+    fn telegram_bridge(&self) -> Option<evy_comms::TelegramBridge> {
+        Some(self.0.clone())
+    }
+}
+
+fn telegram_test_bridge(base_url: &str) -> evy_comms::TelegramBridge {
+    let mut cfg = evy_comms::TelegramConfig::new("TESTTOKEN".to_string(), 12345);
+    cfg.base_url = base_url.to_string();
+    cfg.long_poll_timeout = Duration::from_millis(50);
+    cfg.poll_interval = Duration::from_millis(20);
+    evy_comms::TelegramBridge::new(cfg, Arc::new(evy_comms::AskRegistry::new()))
+}
+
+#[tokio::test]
+async fn notify_without_bridge_returns_503() {
+    let (base, _bc, shutdown) = spawn_stub_server().await;
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/api/evy/notify"))
+        .json(&serde_json::json!({ "text": "hello" }))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(resp.status(), 503);
+    let body: Value = resp.json().await.expect("json");
+    assert_eq!(body["ok"], false);
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn ask_without_bridge_returns_503() {
+    let (base, _bc, shutdown) = spawn_stub_server().await;
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/api/evy/ask"))
+        .json(&serde_json::json!({ "question": "go?" }))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(resp.status(), 503);
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn notify_with_bridge_sends_and_returns_ok() {
+    let tg = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/botTESTTOKEN/sendMessage"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+            serde_json::json!({ "ok": true, "result": { "message_id": 7 } }),
+        ))
+        .expect(1)
+        .mount(&tg)
+        .await;
+
+    let state = Arc::new(TelegramTestState(telegram_test_bridge(&tg.uri())));
+    let (base, _bc, shutdown) = spawn_server_with_state(state).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/api/evy/notify"))
+        .json(&serde_json::json!({ "text": "criterion six says hi" }))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.expect("json");
+    assert_eq!(body["ok"], true);
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn ask_with_no_reply_returns_504() {
+    let tg = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/botTESTTOKEN/sendMessage"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+            serde_json::json!({ "ok": true, "result": { "message_id": 8 } }),
+        ))
+        .mount(&tg)
+        .await;
+
+    let state = Arc::new(TelegramTestState(telegram_test_bridge(&tg.uri())));
+    let (base, _bc, shutdown) = spawn_server_with_state(state).await;
+
+    // timeout_s = 0 expires immediately — no reply will ever arrive.
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/api/evy/ask"))
+        .json(&serde_json::json!({ "question": "anyone there?", "timeout_s": 0 }))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(resp.status(), 504);
+    let body: Value = resp.json().await.expect("json");
+    assert_eq!(body["ok"], false);
+    shutdown.cancel();
+}
