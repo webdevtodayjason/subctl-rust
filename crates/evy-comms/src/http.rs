@@ -163,6 +163,22 @@ pub trait AppState: Send + Sync + 'static {
         None
     }
 
+    /// v4-parity sprint (W1) — pi-ai-catalog data for the providers family.
+    /// Today the only native consumer is the `POST /api/providers/profiles`
+    /// write-gate (the accepted provider-id set); `GET /api/providers` and
+    /// `GET /api/catalogs` remain on the v3 reverse-proxy.
+    ///
+    /// Default `None` means the daemon hasn't wired the
+    /// `@earendil-works/pi-ai` registry yet — the profile write-gate is then
+    /// permissive while LM Studio + `accounts.conf` data still serve
+    /// natively. The daemon overrides this once the registry is available;
+    /// the returned [`ProviderCatalogData`](crate::providers_http::ProviderCatalogData)
+    /// is the wiring point any future native migration of the list endpoints
+    /// would extend.
+    fn provider_catalog(&self) -> Option<crate::providers_http::ProviderCatalogData> {
+        None
+    }
+
     /// Cutover Phase 2 (2j) — spawn a worker on the named account, registering
     /// it so `workers()` reflects it (criterion #1). Default impl returns
     /// [`SpawnError::Unsupported`] so the stub keeps compiling; the daemon's
@@ -598,6 +614,23 @@ fn build_router(
         .route(
             "/api/policy/preset/{path}",
             post(crate::projects_http::preset_apply_handler),
+        )
+        // v4-parity sprint (W1) — providers/models/catalogs family, NATIVE only
+        // where v4 owns the data: LM Studio model catalog + force-refresh, and
+        // accounts.conf profile CRUD. `GET /api/providers`, `GET /api/catalogs`,
+        // and the per-provider catalog sub-endpoints are pi-ai-catalog-driven
+        // (no Rust data source) and deliberately stay on the v3 reverse-proxy
+        // catch-all below — serving them natively would drop the cloud-provider
+        // rows the Providers panel shows.
+        .route("/api/models", get(crate::providers_http::models_handler))
+        .route(
+            "/api/models/refresh",
+            post(crate::providers_http::models_refresh_handler),
+        )
+        .route(
+            "/api/providers/profiles",
+            post(crate::providers_http::profiles_post_handler)
+                .delete(crate::providers_http::profiles_delete_handler),
         )
         // /api/live (web terminal WS) — WS upgrade can't go through the HTTP
         // reverse-proxy, so it's bridged separately. Specific route wins over
