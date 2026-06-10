@@ -687,17 +687,12 @@ fn build_router(
         // reverse-proxy, so it's bridged separately. Specific route wins over
         // the catch-all below.
         .route("/api/live", get(crate::proxy_http::ws_proxy_handler))
-        // Native dashboard-owned settings reads + auth/update status (W2).
-        // Read-only; the mutation + master-proxied members of the family stay
-        // on the catch-all below. See `preferences_http` module docs.
-        .route(
-            "/api/settings/keys",
-            get(crate::preferences_http::keys_handler),
-        )
-        .route(
-            "/api/settings/secrets",
-            get(crate::preferences_http::secrets_handler),
-        )
+        // Native dashboard-owned settings reads — auth status, obsidian config,
+        // and the redacted config files (W2). Read-only and v4-owned. The
+        // env/install-coupled members (`/api/settings/keys`, `/settings/secrets`,
+        // `/api/update/check`) read v3-Bun-process state launchd's bare env can't
+        // see, so they stay on the catch-all reverse-proxy below; the mutation +
+        // master-proxied members do too. See `preferences_http` module docs.
         .route(
             "/api/settings/oauth",
             get(crate::preferences_http::oauth_handler),
@@ -709,10 +704,6 @@ fn build_router(
         .route(
             "/api/settings/config/{name}",
             get(crate::preferences_http::config_get_handler),
-        )
-        .route(
-            "/api/update/check",
-            get(crate::preferences_http::update_check_handler),
         )
         // /api/terminal/attach (ADR 0011 Layer 2) — the web-terminal WS attach.
         // Like /api/live it can't ride the reqwest reverse-proxy (no upgrade
