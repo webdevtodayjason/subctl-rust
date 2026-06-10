@@ -535,6 +535,33 @@ fn build_router(
         // reverse-proxy, so it's bridged separately. Specific route wins over
         // the catch-all below.
         .route("/api/live", get(crate::proxy_http::ws_proxy_handler))
+        // Native dashboard-owned settings reads + auth/update status (W2).
+        // Read-only; the mutation + master-proxied members of the family stay
+        // on the catch-all below. See `preferences_http` module docs.
+        .route(
+            "/api/settings/keys",
+            get(crate::preferences_http::keys_handler),
+        )
+        .route(
+            "/api/settings/secrets",
+            get(crate::preferences_http::secrets_handler),
+        )
+        .route(
+            "/api/settings/oauth",
+            get(crate::preferences_http::oauth_handler),
+        )
+        .route(
+            "/api/settings/obsidian",
+            get(crate::preferences_http::obsidian_get_handler),
+        )
+        .route(
+            "/api/settings/config/{name}",
+            get(crate::preferences_http::config_get_handler),
+        )
+        .route(
+            "/api/update/check",
+            get(crate::preferences_http::update_check_handler),
+        )
         .route("/api/{*rest}", any(crate::proxy_http::reverse_proxy_handler));
 
     // Phase 4 Slice A: optionally serve the operator-console static
