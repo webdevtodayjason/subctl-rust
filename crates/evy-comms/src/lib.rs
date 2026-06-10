@@ -83,6 +83,9 @@ pub mod transcript_http;
 // ── Cutover Phase 0: reverse-proxy fallback to v3 Bun + native /api/host ──
 pub mod proxy_http;
 
+// ── Web terminal (ADR 0011 Layer 2): upgrade-capable WS proxy to Bun ──
+pub mod terminal_ws;
+
 // ── Cutover Phase 1: dashboard state synthesis (verdict, rate-limits, /api/state) ──
 pub mod dashboard_state;
 // ── Cutover Phase 1 slice 1c: 3-layer usage cache (shells `subctl usage --json`) ──
