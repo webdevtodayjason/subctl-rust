@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # subctl — v4 entry point.  Default behaviour is to launch the Ink chat
 # TUI; daemon control + diagnostics are handled inline so the operator
-# doesn't pay Node start-up cost for them.
+# doesn't pay Node start-up cost for them.  Any other subcommand
+# (accounts, auth, teams, radar, service, …) is forwarded verbatim to
+# the v3 management CLI so v4 owning the bare `subctl` name doesn't
+# shadow the v3 surface.
 #
 # Dev mode resolves the JS bundle relative to the script. The install-
 # integrator worker rewrites this to the production install path once
@@ -36,8 +39,33 @@ Usage:
   subctl version               print the TUI bundle version
   subctl --help                show this help
 
+Any other subcommand (accounts, auth, teams, radar, service, …) is
+forwarded verbatim to the v3 management CLI (\$_SUBCTL_V3 override,
+falling back to ~/bin/subctl). Try: subctl help
+
 Inside the chat surface, type /help for slash commands.
 EOF
+}
+
+# v3 fall-through: anything outside the v4 reserved set (bare
+# invocation, chat, daemon, health, logs, version, --help/-h) belongs
+# to the v3 management CLI — accounts, auth, teams, radar, service,
+# session-list, … The dashboard copies commands like
+# `subctl auth claude <alias>` to the clipboard, so they must work
+# verbatim through this shim. Resolution mirrors _subctl_v3 in
+# shell-aliases.sh: $_SUBCTL_V3 override first, then ~/bin/subctl.
+# No `command subctl` fallback — that resolves back to this script
+# and would recurse.
+forward_v3() {
+  local v3
+  for v3 in "${_SUBCTL_V3:-}" "${HOME}/bin/subctl"; do
+    if [[ -n "${v3}" && -x "${v3}" ]]; then
+      exec "${v3}" "$@"
+    fi
+  done
+  echo "[subctl] '${1}' is not a v4 subcommand, and no v3 subctl was found to forward it to." >&2
+  echo "[subctl] checked \$_SUBCTL_V3 (${_SUBCTL_V3:-unset}) and ${HOME}/bin/subctl." >&2
+  exit 127
 }
 
 # `launchctl list | grep -q LABEL` runs into SIGPIPE under
@@ -149,11 +177,11 @@ case "${1:-}" in
   version|--version|-V)
     cmd_version
     ;;
-  --help|-h|help)
+  --help|-h)
     print_usage
     ;;
   *)
-    print_usage >&2
-    exit 2
+    # not a v4 word — hand the whole invocation to the v3 CLI
+    forward_v3 "$@"
     ;;
 esac

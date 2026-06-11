@@ -341,6 +341,22 @@ fn row_alias(line: &str) -> Option<&str> {
     t.split('|').next().map(str::trim)
 }
 
+/// Join `accounts.conf` rows into file content terminated with exactly one
+/// trailing `\n`, dropping trailing blank rows (split artifacts of already-
+/// terminated content). The terminator is load-bearing: v3's
+/// `while IFS='|' read` parsers silently drop an unterminated final line,
+/// which made a freshly-added last row invisible to `subctl accounts`.
+fn rows_to_content<S: AsRef<str>>(rows: &[S]) -> String {
+    let mut end = rows.len();
+    while end > 0 && rows[end - 1].as_ref().trim().is_empty() {
+        end -= 1;
+    }
+    rows[..end]
+        .iter()
+        .map(|r| format!("{}\n", r.as_ref()))
+        .collect()
+}
+
 /// Add or edit an `accounts.conf` profile row (port of the v3
 /// `POST /api/providers/profiles` handler).
 ///
@@ -397,6 +413,11 @@ fn do_post_profile(
         Ok(s) => s.split('\n').map(str::to_string).collect(),
         Err(_) => Vec::new(),
     };
+    // Drop trailing blank rows (the split artifact of newline-terminated
+    // content) so an appended row lands right after the last real row.
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
     // Column widths match v3's `padEnd(15|7|32|25)` exactly so the row is
     // byte-identical to what the Bun dashboard writes.
     let new_row =
@@ -432,7 +453,7 @@ fn do_post_profile(
             ));
         }
     }
-    match std::fs::write(path, lines.join("\n")) {
+    match std::fs::write(path, rows_to_content(&lines)) {
         Ok(()) => Ok(json!({ "ok": true, "alias": alias, "mode": mode })),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -472,7 +493,7 @@ fn do_delete_profile(path: &Path, alias: &str) -> CrudResult {
             json!({ "ok": false, "error": "alias not found" }),
         ));
     }
-    match std::fs::write(path, filtered.join("\n")) {
+    match std::fs::write(path, rows_to_content(&filtered)) {
         Ok(()) => Ok(json!({ "ok": true, "alias": alias })),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -801,5 +822,71 @@ mod tests {
         assert_eq!(s, StatusCode::NOT_FOUND);
         let (s, _) = do_delete_profile(&path, "").unwrap_err();
         assert_eq!(s, StatusCode::BAD_REQUEST);
+    }
+
+    /// Emulates v3's `while IFS='|' read` loop: bash `read` only yields
+    /// newline-terminated lines, so an unterminated trailing fragment is
+    /// silently dropped — exactly the failure that hid a freshly-added row.
+    fn bash_read_lines(content: &str) -> Vec<&str> {
+        let mut out = Vec::new();
+        let mut rest = content;
+        while let Some(i) = rest.find('\n') {
+            out.push(&rest[..i]);
+            rest = &rest[i + 1..];
+        }
+        out // any unterminated tail in `rest` is dropped, like bash read
+    }
+
+    #[test]
+    fn post_profile_terminates_file_so_last_row_survives_line_read() {
+        let path = tmpdir().join("accounts.conf");
+        // regression: pre-existing file WITHOUT a trailing newline (the
+        // state that made `claude-teams -a argent` resolve to nothing)
+        std::fs::write(
+            &path,
+            "claude-a | anthropic | a@y.com | ~/.claude-a | first",
+        )
+        .unwrap();
+        let body = json!({
+            "alias": "argent", "provider": "anthropic",
+            "email": "argent@y.com", "config_dir": "~/.claude-argent", "description": "new"
+        });
+        do_post_profile(&path, &body, None).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.ends_with('\n'), "file must end with a newline");
+        assert!(!written.ends_with("\n\n"), "exactly one trailing newline");
+        // the freshly appended last row must survive a bash-style line read
+        let seen: Vec<_> = bash_read_lines(&written)
+            .iter()
+            .filter_map(|l| row_alias(l))
+            .collect();
+        assert_eq!(seen, vec!["claude-a", "argent"]);
+    }
+
+    #[test]
+    fn profile_rewrites_keep_terminator_and_never_accumulate_blank_lines() {
+        let path = tmpdir().join("accounts.conf");
+        let add = |alias: &str| json!({ "alias": alias, "provider": "anthropic", "email": "e", "config_dir": "d" });
+        do_post_profile(&path, &add("a"), None).unwrap();
+        do_post_profile(&path, &add("b"), None).unwrap();
+        do_post_profile(&path, &add("c"), None).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.ends_with('\n'), "add rewrite keeps terminator");
+        assert!(!written.contains("\n\n"), "no blank-line gaps accumulate");
+        assert_eq!(bash_read_lines(&written).len(), 3);
+        // edit + delete rewrites stay terminated too
+        let edit = json!({
+            "alias": "c", "provider": "openai", "email": "e2",
+            "config_dir": "d2", "mode": "edit"
+        });
+        do_post_profile(&path, &edit, None).unwrap();
+        do_delete_profile(&path, "b").unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.ends_with('\n'), "delete rewrite keeps terminator");
+        let seen: Vec<_> = bash_read_lines(&written)
+            .iter()
+            .filter_map(|l| row_alias(l))
+            .collect();
+        assert_eq!(seen, vec!["a", "c"]);
     }
 }
