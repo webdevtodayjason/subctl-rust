@@ -423,6 +423,7 @@ async fn boot_default_watchdogs(
         ctx.obs_log.clone(),
         teams,
         tmux,
+        evy_core::WorkerRegistry::new(),
     );
     (events, diag, shutdown, (s_dir, o_dir))
 }
@@ -446,12 +447,15 @@ async fn boot_registration_streams_watchdog_fire_for_stale_team() {
     assert!(prompt.contains("quiet"), "prompt names the team: {prompt}");
     assert!(data["ts"].as_str().expect("ts").ends_with('Z'));
 
-    // Heartbeat + diag surface unchanged: all three defaults present,
-    // heartbeat at its crate-default cadence.
+    // Heartbeat + diag surface: all four defaults present (W6 row ⑧
+    // armed watchdog-prune; idle-pane stays deliberately dormant).
     let snap = diag.diag_snapshot(Utc::now());
     let mut ids: Vec<&str> = snap.iter().map(|w| w.id.as_str()).collect();
     ids.sort_unstable();
-    assert_eq!(ids, ["heartbeat", "team-gc", "team-staleness"]);
+    assert_eq!(
+        ids,
+        ["heartbeat", "team-gc", "team-staleness", "watchdog-prune"]
+    );
 
     diag.shutdown();
     shutdown.cancel();

@@ -44,6 +44,16 @@ pub enum Finding {
         session: String,
     },
 
+    /// The terminal-worker reap (W6 row ⑨) retired a finished worker's
+    /// registry row after the grace window. The hosting tmux session is
+    /// left alone — only the bookkeeping retires.
+    ReapedWorker {
+        /// Worker whose registry row was retired.
+        worker_id: WorkerId,
+        /// The session that hosted it, when one was recorded.
+        session: Option<String>,
+    },
+
     /// Auto-nudge dispatched a status-check directive to a stuck worker.
     /// `attempts` is the running count for *this* worker since it last
     /// produced output — escalation to [`Finding::WorkerDead`] fires when
