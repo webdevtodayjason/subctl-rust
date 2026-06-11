@@ -3,6 +3,7 @@
 **Wave:** W5 / S1 (locked contract 2026-06-11T02:15Z) · **Operator directive:** "Everything that was in v3 needs to be in v4. That is crucial." (decision log 2026-06-11T01:00Z)
 **v3 reference:** `/Users/sem/code/subctl` (dashboard `server.ts` 7,546 lines; evy master `components/evy/server.ts`)
 **v4 reference:** `subctl-rust` `main` @ `f4f1f36` (X2 merge) — `crates/evy-comms/src/http.rs` router block, crates survey, ORCHESTRATION.md waves 1–4 + X1/X2.
+**Amended post-S2 (W5 memory-wave verification, w-memory worker):** memory-family rows corrected per live verification — tier1/bare-memory/cognee/memori now native; `/api/memory/{stats,recent,search,entries}` tripwire fired (master-owned SQLite, NOT claude-mem) and is re-rowed. See "Amendments (post-S2)" at the bottom.
 **This doc is the W7 retirement checklist.** W7 gate = every non-`done` row below is either shipped or carries an explicit operator decision.
 
 ## Sanity-check counts
@@ -72,12 +73,12 @@ v4 (:8797) fronts everything; routes marked `proxied` ride `/api/{*rest}` → v3
 | 44 | `/api/settings/config/{name}` | GET | dashboard (redacted config files) | native | done | W2; GET-only in v3 (verified server.ts:4363) |
 | 45 | `/api/projects/create` | POST | dashboard | native | done | W3 |
 | 46 | `/api/projects/{name}` | GET | dashboard | native | done | W3; GET-only in v3 (verified server.ts:4611) |
-| 47 | `/api/memory/tier1` | GET, POST | dashboard (master's always-in-context flat file) | proxied | **W5** | S2 in flight — recon verdict: PORT if file-coherent (obsidian precedent) |
+| 47 | `/api/memory/tier1` | GET, POST | dashboard (master's always-in-context flat file) | native | done (W5) | S2 shipped. **LATENT (W6 candidate):** v3's tier1-memory.ts writes `~/.config/subctl/master/`, reaching the documented `evy/` dir only via a host-local SYMLINK — fresh installs silently lose dashboard tier1 edits; also v3 dashboard tier1 block hardcodes `$HOME`, ignoring `SUBCTL_CONFIG_DIR` (server.ts:4752) |
 | 48 | `/api/vault/roots` | GET | dashboard (vault dirs on disk) | proxied | W6 | vault browser family — file-backed reads; omitted from W5 recon table, assigning W6. *Contestable: could fold into the W5 memory family* |
 | 49 | `/api/vault/{root}/tree` | GET | dashboard | proxied | W6 | |
 | 50 | `/api/vault/{root}/note` | GET, POST | dashboard | proxied | W6 | POST = note write (same-owner flat file) |
 | 51 | `/api/vault/{root}/asset` | GET | dashboard | proxied | W6 | |
-| 52 | `/api/memory` (bare) | GET | dashboard (Obsidian + vault state) | proxied | **W5** | recon verdict: PORT (read) |
+| 52 | `/api/memory` (bare) | GET | dashboard (Obsidian + vault state) | native | done (W5) | S2 shipped |
 | 53 | `/api/version` | GET | dashboard | native | done | |
 | 54 | `/api/update/check` | GET | dashboard (install tree + git) | proxied | W7-prep | install-coupled |
 | 55 | `/api/update/events` (SSE) | GET | dashboard | proxied (**LATENT: dark through catch-all — pre-existing, closet-logged**) | W6 | already assigned to W6 in the W4 close-out |
@@ -104,9 +105,9 @@ v4 (:8797) fronts everything; routes marked `proxied` ride `/api/{*rest}` → v3
 | 76 | `/api/voice/*` (incl. `/audio/{file}`) | GET, POST | dashboard → master | proxied | long-tail | W5 non-goal; evy-voice crate is the native substrate, HTTP surface unported |
 | 77 | `/api/preferences/*` | GET, POST | dashboard → master | proxied (**DEAD: master has zero `/preferences` routes — live-probed 404 "not found"**) | W6 | latent restoration: decide restore-in-v4 vs declare-dead; `subctl prefs` CLI reads the TOML directly and works |
 | 78 | `/api/upstreams` + `/check` `/history` `/update` `/auto-update/toggle` | GET, POST | dashboard → master | proxied | long-tail | **Contestable: pi-ai/pi-agent-core npm upstreams are v3-stack concepts — candidate for retire-with-v3 instead of port** |
-| 79 | `/api/cognee/*` | any | dashboard → Cognee sidecar (:port from config) | proxied | **W5** | recon verdict: thin native forward |
-| 80 | `/api/memori/*` | any | dashboard → Memori sidecar | proxied | **W5** | recon verdict: thin native forward |
-| 81 | `/api/memory/{stats,recent,search,entries[,/{id}]}` | GET, POST, DELETE | dashboard → master memory store | proxied | **W5** | reads native via ClaudeMemReader; entry DELETE write is tripwired (S2) |
+| 79 | `/api/cognee/*` | any | dashboard → Cognee sidecar (:8745, `SUBCTL_COGNEE_PORT`) | native | done (W5) | S2 shipped — thin native forward |
+| 80 | `/api/memori/*` | any | dashboard → Memori sidecar (:8746, `SUBCTL_MEMORI_PORT`) | native | done (W5) | S2 shipped — thin native forward |
+| 81 | `/api/memory/{stats,recent,search,entries[,/{id}]}` | GET, POST, DELETE | **v3 master runtime store** — master's OWN SQLite `~/.local/state/subctl/memory/evy.db` (components/evy/memory.ts:24,73), NOT claude-mem | proxied | Evy-agency-or-later | **S2 TRIPWIRE FIRED** — blocked on store ownership, not effort. Master applies daemon-side egress redaction (server.ts:4882–4886); any native port MUST reproduce it |
 | 82 | `/api/evy/*` catch-all → master `/{rest}` | any | dashboard → master | proxied | — | umbrella; every reachable master route censused row-by-row in Class 1b |
 | 83 | `/api/refresh` | POST | dashboard | native | done | W1-sprint (usage cache bust) |
 | 84 | `/cheat`, `/cheatsheet` | GET | dashboard | proxied | W7-prep | static helper page; trivial port or drop with operator nod |
@@ -153,12 +154,12 @@ v4 (:8797) fronts everything; routes marked `proxied` ride `/api/{*rest}` → v3
 | 17 | `/upstreams/history` | GET | master | proxied | long-tail | |
 | 18 | `/upstreams/update` | POST | master | proxied | long-tail | |
 | 19 | `/upstreams/auto-update/toggle` | POST | master | proxied | long-tail | |
-| 20 | `/memory/search` | GET | master (Cognee→claude-mem fallback) | proxied | **W5** | S2 reads-native slice |
-| 21 | `/memory/recent` | GET | master | proxied | **W5** | |
-| 22 | `/memory/stats` | GET | master | proxied | **W5** | |
-| 23 | `/memory/entries` | POST | master | proxied | **W5** | write — tripwired in S2 |
-| 24 | `/memory/entries/{id}` | DELETE | master | proxied | **W5** | write — tripwired in S2 |
-| 25 | `/memory/kernel/status` | GET | master runtime | absent | long-tail | W5 explicit non-goal (kernel = master runtime); ports with runtime row 4.7 |
+| 20 | `/memory/search` | GET | **master runtime store** (own SQLite `~/.local/state/subctl/memory/evy.db` — memory.ts:24,73; NOT claude-mem) | proxied | Evy-agency-or-later | S2 TRIPWIRE — blocked on store ownership, not effort; egress redaction (server.ts:4882–4886) must be reproduced |
+| 21 | `/memory/recent` | GET | master runtime store (evy.db) | proxied | Evy-agency-or-later | same |
+| 22 | `/memory/stats` | GET | master runtime store (evy.db) | proxied | Evy-agency-or-later | same |
+| 23 | `/memory/entries` | POST | master runtime store (evy.db) | proxied | Evy-agency-or-later | write |
+| 24 | `/memory/entries/{id}` | DELETE | master runtime store (evy.db) | proxied | Evy-agency-or-later | write |
+| 25 | `/memory/kernel/status` | GET | master runtime | absent | long-tail | W5 explicit non-goal (kernel = master runtime); ports with runtime row 4.7. **memory.js kernel panel still requires v3+master up post-W5 (expected strangler state)** |
 | 26 | `/memory/kernel/run-now` | POST | master | absent | long-tail | |
 | 27 | `/memory/kernel/pause` | POST | master | absent | long-tail | |
 | 28 | `/memory/kernel/resume` | POST | master | absent | long-tail | |
@@ -166,7 +167,7 @@ v4 (:8797) fronts everything; routes marked `proxied` ride `/api/{*rest}` → v3
 | 30 | `/memory/tier1/approve` | POST | master | absent | long-tail | |
 | 31 | `/memory/tier1/reject` | POST | master | absent | long-tail | |
 | 32 | `/memory/tier1/consolidate` | POST | master | absent | long-tail | |
-| 33 | `/memory/backfill/evy-to-memori` | POST | master | absent | long-tail | operator-demand backfills |
+| 33 | `/memory/backfill/evy-to-memori` | POST | master | absent | long-tail | operator-demand backfills. **memory.js backfill panel still requires v3+master up post-W5 (expected strangler state)** |
 | 34 | `/memory/backfill/claude-mem-to-cognee` | POST | master | absent | long-tail | |
 | 35 | `/memory/backfill/obsidian-to-cognee` | POST | master | absent | long-tail | |
 | 36 | `/transcript` | GET | master | native | done | chat family (master dialect via scoped rewrite) |
@@ -208,9 +209,9 @@ v4 (:8797) fronts everything; routes marked `proxied` ride `/api/{*rest}` → v3
 | telegram.ts | telegram_send, telegram_send_voice, telegram_send_digest (3) | outbound Telegram (text/voice/digest) | — | absent (text bridge native; tool wiring + voice absent) | Evy-agency | voice notes need creds — **operator checkpoint** |
 | system.ts | system_hardware, system_load, system_disk, system_lmstudio_models, system_tmux_sessions, system_process_top, system_projects_dir, system_daemon_self, system_my_tools (9) | host introspection | — | absent | Evy-agency | read-only; first slice of the agency wave per decision log |
 | project.ts | project_create, vault_append (2) | project scaffold + vault append | — | absent | Evy-agency | |
-| memory.ts | memory_search, memory_timeline, memory_observations, memory_health (4) | Tier-4 memory (Cognee→claude-mem) | — | absent | Evy-agency | substrate native: evy-memory crate has ClaudeMemReader; W5/S2 makes reads native |
+| memory.ts | memory_search, memory_timeline, memory_observations, memory_health (4) | Tier-4 memory (Cognee→claude-mem) | — | absent | Evy-agency | substrate native: evy-memory crate has ClaudeMemReader (Tier-4 claude-mem only — the Tier-3 evy.db store stays master-owned per S2 tripwire) |
 | context7.ts | context7_resolve, context7_docs, context7_health (3) | Context7 docs lookup | CONTEXT7_API_KEY | absent | Evy-agency | |
-| tier1-memory.ts | memory_show, memory_remember, memory_forget, memory_user_update, memory_tier1_pending, memory_tier1_approve, memory_tier1_reject (7) | Tier-1 always-in-context memory + approval workflow | — | absent | Evy-agency | couples to runtime rows 4.7–4.8 |
+| tier1-memory.ts | memory_show, memory_remember, memory_forget, memory_user_update, memory_tier1_pending, memory_tier1_approve, memory_tier1_reject (7) | Tier-1 always-in-context memory + approval workflow | — | absent | Evy-agency | couples to runtime rows 4.7–4.8. **LATENT:** writes `~/.config/subctl/master/`, reaches documented `evy/` dir only via host-local symlink (see 1a #47) |
 | skill-author.ts | skill_create, skill_revise, skill_remove, skill_list_master (4) | master-private skill catalog authoring | skill-router | absent | Evy-agency | |
 | skills-author.ts | evy_author_skill, evy_list_authored_skills, evy_promote_skill, evy_delete_authored_skill (4) | Evy-curated skill drafts (operator review) | skill-router | absent | Evy-agency | pairs with dashboard rows 1a #33–35 |
 | notify.ts | notify_dashboard (1) | push notification to dashboard tray | — | absent | Evy-agency | substrate native: v4 notifications store |
@@ -350,20 +351,20 @@ Owner today = v3 bash CLI (`lib/*.sh`) for every row. v4 status = `proxied` (shi
 
 | Status | 1a routes | 1b routes | 2 tool modules | 3 CLI (verbs+bins+helpers) | 4 runtime | Total |
 |---|---|---|---|---|---|---|
-| native (done) | 36 | 17 | 0 | 3 | 9 | **65** |
-| proxied | 67 | 17 | 0 | 50 | 0 | **134** |
+| native (done) | 40 | 17 | 0 | 3 | 9 | **69** |
+| proxied | 63 | 17 | 0 | 50 | 0 | **130** |
 | absent | 0 | 26 | 30 (all modules) | 0 | 19 | **75** |
 | independent | 0 | 0 | 0 | 5 | 0 | **5** |
 
-*(Row-level counts: dashboard natives = rows 1–9, 14–18, 26–27, 37, 41–46, 53, 65, 83, 94–95, 100–103 incl. multi-method rows counted once.)*
+*(Row-level counts: dashboard natives = rows 1–9, 14–18, 26–27, 37, 41–46, 47, 52, 53, 65, 79–80, 83, 94–95, 100–103 incl. multi-method rows counted once. Post-S2: +4 native, −4 proxied vs the merged v1.)*
 
 ### By assigned wave (non-done rows)
 
 | Wave | Rows | Headline contents |
 |---|---|---|
-| **W5** (in flight, S2) | 10 | memory tier1 GET/POST, bare /api/memory, cognee/memori thin forwards, /api/memory/{stats,recent,search,entries,{id}} |
-| **W6** | 10 | latent SSEs (/api/update/events, logs/stream, notifications/stream), dead /api/preferences restoration, vault browser family, logs reads, arm idle-pane + prune watchdogs |
-| **Evy-agency** | 34 | all 28 wired tool modules (99 tools), /api/teams/tools, inbox poll, follow-up ticker, background-runs, circuit breaker |
+| **W5** (CLOSED — S2 verified) | 0 remaining | 4 rows shipped native (memory tier1, bare /api/memory, cognee + memori thin forwards); 6 rows (/api/memory/{stats,recent,search,entries,{id}} both dialects) re-rowed to Evy-agency-or-later after the S2 tripwire (master-owned SQLite store) |
+| **W6** | 10 (+1 note-level latent) | latent SSEs (/api/update/events, logs/stream, notifications/stream), dead /api/preferences restoration, vault browser family, logs reads, arm idle-pane + prune watchdogs, tier1 config-dir symlink + `$HOME` hardcode fix (carried as note on 1a #47) |
+| **Evy-agency** | 40 | all 28 wired tool modules (99 tools), /api/teams/tools, inbox poll, follow-up ticker, background-runs, circuit breaker, + 6 master-memory-store routes (Evy-agency-or-later, ownership-blocked) |
 | **long-tail** | ~100 | skills panel family, policy/audit family, providers/catalogs (pi-ai ⚠), auth flows, voice family, memory kernel + tier1 workflow + backfills, local-backend, personality/profile, upstreams ⚠, MCP server, master live-teams view, most CLI verbs |
 | **W7-prep** | ~40 | install/update/deploy/service/uninstall machinery, settings keys/secrets, bare-path repoints (sessions/orchestration/watchdogs/notifications), /api/live, doctor/status/logs CLI, cheat/help |
 
@@ -390,3 +391,14 @@ Owner today = v3 bash CLI (`lib/*.sh`) for every row. v4 status = `proxied` (shi
 1. pi-ai catalog port effort (providers/catalogs family) — days of work, no Rust port exists.
 2. Terminal real-PTY libc/openpty waiver (terminal family).
 3. Telegram voice-note creds (telegram_send_voice + inbound voice).
+
+---
+
+## Amendments (post-S2, W5 memory-wave verification — w-memory worker, relayed by orchestrator)
+
+1. **TRIPWIRE FIRED on `/api/memory/{stats,recent,search,entries/*}`** (1a #81, 1b #20–24): backing store is master's OWN SQLite at `~/.local/state/subctl/memory/evy.db` (components/evy/memory.ts:24,73) with daemon-side egress redaction (server.ts:4882–4886) — **NOT claude-mem** as the recon table assumed. Rows flipped to owner = v3 master runtime store, status = proxied, wave = **Evy-agency-or-later** (blocked on store ownership, not effort). Any future native port must reproduce the redaction layer.
+2. **Shipped native in W5** (flipped to done): `/api/memory/tier1` GET/POST (1a #47), bare `/api/memory` GET (1a #52), `/api/cognee/*` (1a #79, sidecar :8745 / `SUBCTL_COGNEE_PORT`), `/api/memori/*` (1a #80, sidecar :8746 / `SUBCTL_MEMORI_PORT`).
+3. **New latent (W6 candidate, noted on 1a #47 + Class-2 tier1-memory row):** v3 tier1-memory.ts writes `~/.config/subctl/master/`, which reaches the documented `evy/` dir only via a host-local symlink — fresh installs without the symlink silently lose dashboard tier1 edits. Also the dashboard tier1 block hardcodes `$HOME` and ignores `SUBCTL_CONFIG_DIR` (server.ts:4752), inconsistent with the rest of server.ts.
+4. **Strangler note:** memory.js kernel + backfill panels still require v3+master up after this wave (expected strangler state) — noted on 1b #25 and #33.
+
+Net effect on totals: native 65→69, proxied 134→130; W5 closed; Evy-agency 34→40.
