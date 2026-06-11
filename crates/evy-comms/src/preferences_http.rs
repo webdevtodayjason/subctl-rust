@@ -23,13 +23,16 @@
 //! - **telegram** (POST) is a sanctioned deviation (lead ruling, ORCHESTRATION.md):
 //!   v3 wrote `evy-notify.json`, which was DISARMED on 2026-06-09 when v4 took
 //!   bot ownership. v4 instead writes the `[comms.telegram]` table of the
-//!   daemon's `config.toml` (the section the live bridge is built from). The
-//!   write is **restart-required**: the [`crate::telegram::TelegramBridge`]
-//!   holds its config immutably behind `Arc<Inner>`, built once at boot and
-//!   wired into an already-`Arc`'d `DaemonAppState`, so a live hot-swap is not a
-//!   contained change (it would need interior-mutability across the bridge's
-//!   poll loop, and the boot-absent case reaches into the `evy` daemon crate to
-//!   construct + spawn a bridge — a new subsystem). The TOML write is surgical:
+//!   daemon's `config.toml` (the section the live bridge is built from). Since
+//!   W6 row ⑥ the write **hot-applies** to a running bridge: the
+//!   [`crate::telegram::TelegramBridge`] keeps its rotating creds
+//!   (`bot_token` / `chat_id`) behind an interior `RwLock` and exposes
+//!   `apply_creds`, which this handler calls after the disk write succeeds —
+//!   the poll loop picks the new values up on its next `getUpdates` iteration.
+//!   The **boot-absent** case (no `[comms.telegram]` when the daemon started)
+//!   remains restart-required: there's no running poll loop to retarget, and
+//!   constructing + spawning a bridge reaches into the `evy` daemon crate — a
+//!   new subsystem, deliberately out of scope. The TOML write is surgical:
 //!   only `bot_token` / `chat_id` inside `[comms.telegram]` change; comments and
 //!   every other section are preserved byte-for-byte (no `toml`/`toml_edit`
 //!   dependency).
@@ -596,6 +599,11 @@ struct TelegramMerge {
     new_toml: String,
     /// Whether a chat_id is set post-merge (provided now or already present).
     chat_id_set: bool,
+    /// Effective chat id post-merge (freshly provided, else the on-disk
+    /// value). Fed to [`apply_creds`](crate::telegram::TelegramBridge::apply_creds)
+    /// for the hot-apply (W6 row ⑥); `None` leaves a live bridge's current
+    /// chat untouched.
+    chat_id: Option<i64>,
 }
 
 /// Manual `Debug` — `bot_token` (and the `config.toml` text, which embeds it)
@@ -647,12 +655,13 @@ fn merge_telegram_write(
     // Write the validated token always; write chat_id only when freshly
     // provided (`None` leaves any existing chat_id untouched).
     let new_toml = write_telegram_section(current_toml, Some(&merged_token), new_chat);
-    let chat_id_set = new_chat.is_some() || cur_chat.is_some();
+    let merged_chat = new_chat.or(cur_chat);
 
     Ok(TelegramMerge {
         bot_token: merged_token,
         new_toml,
-        chat_id_set,
+        chat_id_set: merged_chat.is_some(),
+        chat_id: merged_chat,
     })
 }
 
@@ -692,9 +701,22 @@ async fn telegram_get_me(token: &str) -> std::result::Result<Option<String>, (St
 }
 
 /// `POST /api/settings/telegram` → merge `bot_token`/`chat_id` into the
-/// `[comms.telegram]` table of `config.toml` (restart-required), after
-/// validating the resulting token via `getMe`. A bad token never lands on disk.
-pub(crate) async fn telegram_write_handler(bytes: Bytes) -> Response {
+/// `[comms.telegram]` table of `config.toml`, after validating the resulting
+/// token via `getMe`. A bad token never lands on disk.
+///
+/// W6 row ⑥ — when the daemon booted with a live
+/// [`TelegramBridge`](crate::telegram::TelegramBridge), the
+/// merged creds are hot-applied to it via
+/// [`apply_creds`](crate::telegram::TelegramBridge::apply_creds): no restart
+/// needed. Boot-absent bridge (`[comms.telegram]` missing at daemon start)
+/// stays restart-required — there is no running poll loop to retarget, and
+/// constructing + spawning one reaches into the daemon crate (out of scope
+/// for this surface). The response's `hot_applied` flag + `message` tell the
+/// operator which case they hit.
+pub(crate) async fn telegram_write_handler(
+    State(state): State<HttpState>,
+    bytes: Bytes,
+) -> Response {
     let body: Value = match serde_json::from_slice(&bytes) {
         Ok(v) => v,
         Err(_) => return err_json(StatusCode::BAD_REQUEST, "invalid JSON body"),
@@ -724,11 +746,26 @@ pub(crate) async fn telegram_write_handler(bytes: Bytes) -> Response {
         return err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
     }
 
+    // Disk write succeeded — retarget the running bridge, if there is one.
+    let hot_applied = match state.app.telegram_bridge() {
+        Some(bridge) => {
+            bridge.apply_creds(merge.bot_token.clone(), merge.chat_id);
+            true
+        }
+        None => false,
+    };
+    let message = if hot_applied {
+        "saved to config.toml — applied to the live telegram bridge, no restart needed"
+    } else {
+        "saved to config.toml — no live bridge to apply to; restart the evy daemon to start one"
+    };
+
     ok_json(json!({
         "ok": true,
         "bot_username": bot_username,
         "chat_id_set": merge.chat_id_set,
-        "message": "saved to config.toml — restart the evy daemon to apply to the live bridge",
+        "hot_applied": hot_applied,
+        "message": message,
     }))
 }
 
@@ -1073,6 +1110,8 @@ chat_id = 111\n";
         let m = merge_telegram_write(SAMPLE_TOML, Some("NEW:tok"), None).unwrap();
         assert_eq!(m.bot_token, "NEW:tok");
         assert!(m.chat_id_set);
+        // Effective chat (for the hot-apply) is the kept-current value.
+        assert_eq!(m.chat_id, Some(111));
         assert!(m.new_toml.contains("chat_id = 111"));
         assert!(m.new_toml.contains("bot_token = \"NEW:tok\""));
     }
@@ -1082,6 +1121,7 @@ chat_id = 111\n";
         let m = merge_telegram_write(SAMPLE_TOML, None, Some("999")).unwrap();
         // token falls back to current; chat_id updated.
         assert_eq!(m.bot_token, "OLD:tok");
+        assert_eq!(m.chat_id, Some(999));
         assert!(m.new_toml.contains("chat_id = 999"));
     }
 
