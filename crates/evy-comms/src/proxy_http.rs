@@ -8,21 +8,44 @@
 //! bridge, session-id injection) and its own proxy to the v3 master (:8788), so
 //! the dashboard is 100% functional while panels migrate to v4 one phase at a time.
 //!
-//! Streaming is passed through chunk-by-chunk (SSE works). WebSocket upgrades
-//! (`/api/live`, the web terminal) are NOT handled here — `reqwest` can't proxy a
-//! WS upgrade; that's tracked as a Phase 0 known gap (hyper-upgrade work, lands
-//! when the terminal panel is ported).
+//! Streaming is passed through chunk-by-chunk. WebSocket upgrades can't ride
+//! `reqwest`, so they get dedicated bridges: [`ws_proxy_handler`] (`/api/live`)
+//! and `terminal_ws` (`/api/terminal/attach`).
+//!
+//! ## SSE head grace (W6 row ①)
+//!
+//! Bun (the v3 upstream) finalizes a streaming response's head only when the
+//! FIRST body chunk is enqueued — until then the bytes on the wire are an
+//! unterminated header block (status + handler headers, no `Date`, no
+//! framing header, no blank line). `/api/update/events` enqueues nothing at
+//! open (its first chunk is the 15s keep-alive tick), so a spec-compliant
+//! client like `reqwest`/hyper correctly sits waiting for the head terminator
+//! and the proxied browser sees NOTHING for up to 15s. (Endpoints that emit a
+//! frame immediately, like `/api/notifications/stream`, get a complete
+//! chunked head from Bun and always worked through the proxy.)
+//!
+//! The fix: a GET whose `Accept` includes `text/event-stream` (exactly what
+//! `EventSource` sends) waits [`SSE_HEAD_GRACE`] for the upstream head. If it
+//! completes in time, the response is mirrored faithfully (real status, real
+//! headers — same as every other proxied request). If not, the upstream is
+//! assumed to be a lazy-headed Bun SSE stream: we synthesize the SSE head
+//! immediately, emit a comment frame as proof-of-life, and splice the
+//! upstream body through once its head finally completes. The synthesized
+//! path drops the upstream's eventual status/headers (it already answered
+//! 200 `text/event-stream`); if the upstream later errors, the body stream
+//! errors out and the client's `EventSource` reconnects.
 
 use std::sync::OnceLock;
 
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     extract::ws::{Message as AxMsg, WebSocket, WebSocketUpgrade},
     extract::{RawQuery, Request},
-    http::{HeaderMap, HeaderName, StatusCode},
+    http::{header, HeaderMap, HeaderName, Method, StatusCode},
     response::{IntoResponse, Json, Response},
+    BoxError,
 };
-use futures::{SinkExt, StreamExt};
+use futures::{future::BoxFuture, stream, SinkExt, StreamExt, TryStreamExt};
 use serde_json::json;
 use tokio_tungstenite::tungstenite::protocol::Message as TgMsg;
 
@@ -63,6 +86,21 @@ fn is_hop_by_hop(name: &HeaderName) -> bool {
         .any(|h| name.as_str().eq_ignore_ascii_case(h))
 }
 
+/// How long an SSE-accepting GET waits for the upstream's response head
+/// before synthesizing one (see module docs). Local Bun answers complete
+/// heads in ~1ms; this only trips on lazy-headed streams whose first chunk
+/// is seconds away.
+const SSE_HEAD_GRACE: std::time::Duration = std::time::Duration::from_millis(750);
+
+/// `EventSource` sends `Accept: text/event-stream` (WHATWG spec); that — on a
+/// GET — is the only pre-head signal that the caller wants a live stream.
+fn accepts_event_stream(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.to_ascii_lowercase().contains("text/event-stream"))
+}
+
 /// Catch-all for any `/api/*` not matched by a native route → forward to Bun.
 /// Method, path+query, headers, and body are preserved; the response (incl. SSE)
 /// is streamed back without buffering.
@@ -89,13 +127,31 @@ pub(crate) async fn reverse_proxy_handler(req: Request) -> Response {
         Err(e) => return bad_gateway(&format!("read request body: {e}")),
     };
 
-    let upstream = client()
+    let sse_get = method == Method::GET && accepts_event_stream(&fwd_headers);
+
+    let send_fut = client()
         .request(method, &url)
         .headers(fwd_headers)
         .body(body_bytes)
-        .send()
-        .await;
+        .send();
 
+    if !sse_get {
+        return mirror_upstream(send_fut.await);
+    }
+
+    // SSE-accepting GET: give the upstream head a short grace window, then
+    // assume a lazy-headed Bun stream and answer for it (module docs).
+    let mut send_fut: BoxFuture<'static, Result<reqwest::Response, reqwest::Error>> =
+        Box::pin(send_fut);
+    match tokio::time::timeout(SSE_HEAD_GRACE, send_fut.as_mut()).await {
+        Ok(upstream) => mirror_upstream(upstream),
+        Err(_elapsed) => synthesized_sse_response(send_fut),
+    }
+}
+
+/// Faithful mirror of the upstream response: real status, non-hop-by-hop
+/// headers, body streamed through chunk-by-chunk (SSE passthrough).
+fn mirror_upstream(upstream: Result<reqwest::Response, reqwest::Error>) -> Response {
     let resp = match upstream {
         Ok(r) => r,
         Err(e) => return bad_gateway(&format!("v3 dashboard (Bun) unreachable: {e}")),
@@ -110,11 +166,47 @@ pub(crate) async fn reverse_proxy_handler(req: Request) -> Response {
             }
         }
     }
-    // Stream the upstream body through chunk-by-chunk (SSE passthrough).
     let stream = resp.bytes_stream();
     builder
         .body(Body::from_stream(stream))
         .unwrap_or_else(|e| bad_gateway(&format!("build proxied response: {e}")))
+}
+
+/// The upstream accepted the connection but hasn't finished its response
+/// head within [`SSE_HEAD_GRACE`] — the lazy-headed Bun SSE signature.
+/// Answer the client NOW with a synthesized SSE head and a proof-of-life
+/// comment frame (spec-legal, invisible to `EventSource`), then splice the
+/// upstream's body through once its head finally completes. reqwest keeps
+/// ownership of the transfer framing (de-chunking) exactly as on the
+/// faithful path.
+fn synthesized_sse_response(
+    send_fut: BoxFuture<'static, Result<reqwest::Response, reqwest::Error>>,
+) -> Response {
+    let open_frame = stream::once(async {
+        Ok::<Bytes, BoxError>(Bytes::from_static(
+            b": v4-proxy open, upstream head pending\n\n",
+        ))
+    });
+    let upstream_body = stream::once(async move {
+        match send_fut.await {
+            Ok(resp) => resp
+                .bytes_stream()
+                .map_err(|e| Box::new(e) as BoxError)
+                .left_stream(),
+            // Upstream died before completing its head: error the body so
+            // the connection aborts and the client's EventSource retries.
+            Err(e) => stream::once(async move { Err::<Bytes, BoxError>(Box::new(e) as BoxError) })
+                .right_stream(),
+        }
+    })
+    .flatten();
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(Body::from_stream(open_frame.chain(upstream_body)))
+        .unwrap_or_else(|e| bad_gateway(&format!("build synthesized SSE response: {e}")))
 }
 
 fn bad_gateway(msg: &str) -> Response {

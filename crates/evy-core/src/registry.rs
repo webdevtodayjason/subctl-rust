@@ -153,6 +153,29 @@ impl WorkerRegistry {
         self.write().remove(id)
     }
 
+    /// W6 row ⑨ ruling — reap finished workers after a grace window.
+    ///
+    /// Removes (and returns) every record whose status
+    /// [`is_terminal`](WorkerStatus::is_terminal) AND whose
+    /// `last_activity_ms` is at least `max_age_ms` old. The tmux session
+    /// is deliberately NOT touched: a lingering session stays visible in
+    /// the session browser (and to the operator's own tmux) — only the
+    /// worker-registry row retires, so finished workers stop counting
+    /// toward the staleness watchdog's `teams_tracked` and can never trip
+    /// `watchdog_fire` after completion. Running/Pending workers are
+    /// never reaped, whatever their age.
+    pub fn reap_terminal(&self, now_ms: i64, max_age_ms: i64) -> Vec<WorkerRecord> {
+        let mut g = self.write();
+        let dead: Vec<WorkerId> = g
+            .values()
+            .filter(|r| {
+                r.status.is_terminal() && now_ms.saturating_sub(r.last_activity_ms) >= max_age_ms
+            })
+            .map(|r| r.id)
+            .collect();
+        dead.into_iter().filter_map(|id| g.remove(&id)).collect()
+    }
+
     /// Number of tracked workers.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -263,6 +286,35 @@ mod tests {
             Some("claude-tmp")
         );
         assert!(!reg.set_tmux_session(&WorkerId::new(), "x".into()));
+    }
+
+    #[test]
+    fn reap_terminal_retires_only_old_finished_workers() {
+        let reg = WorkerRegistry::new();
+        let done_old = rec(1_000);
+        let done_fresh = rec(1_000);
+        let running_old = rec(1_000);
+        let (done_old_id, done_fresh_id, running_old_id) =
+            (done_old.id, done_fresh.id, running_old.id);
+        reg.register(done_old);
+        reg.register(done_fresh);
+        reg.register(running_old);
+        // done_old finished at t=10_000; done_fresh finished at t=95_000;
+        // running_old has been Running and silent since t=1_000.
+        reg.update_status(&done_old_id, WorkerStatus::Succeeded, 10_000);
+        reg.update_status(&done_fresh_id, WorkerStatus::Failed("boom".into()), 95_000);
+
+        // Reap at t=100_000 with a 60s grace window.
+        let reaped = reg.reap_terminal(100_000, 60_000);
+        assert_eq!(reaped.len(), 1);
+        assert_eq!(reaped[0].id, done_old_id);
+        // Fresh-terminal stays (inside grace); running stays (never reaped).
+        assert!(reg.get(&done_fresh_id).is_some());
+        assert!(reg.get(&running_old_id).is_some());
+        assert_eq!(reg.len(), 2);
+
+        // Idempotent: a second sweep at the same instant finds nothing.
+        assert!(reg.reap_terminal(100_000, 60_000).is_empty());
     }
 
     #[test]

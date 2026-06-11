@@ -18,6 +18,20 @@
 //! cheap (O(N) over N teams = single-digit at most) and the
 //! redundancy survived v3's production fire — we keep it.
 //!
+//! # Terminal-worker reap (W6 row ⑨ ruling)
+//!
+//! The sweep's second duty: workers whose status is terminal
+//! (`Succeeded` / `Failed` / `Cancelled`) used to sit in the
+//! [`evy_core::WorkerRegistry`] for as long as their tmux session
+//! lived — counting toward the staleness watchdog's `teams_tracked`
+//! and able to trip `watchdog_fire` AFTER their work was done. Ruling:
+//! reap them [`DEFAULT_TERMINAL_REAP_SECS`] after their last activity.
+//! The session itself is NOT killed — a lingering session stays
+//! operator-visible in the session browser; only the registry row
+//! retires. The reap grace (15 min) is deliberately shorter than the
+//! staleness threshold (30 min) so a finished worker's row is always
+//! gone before it could ever read as "stale".
+//!
 //! TODO: Phase 5 — extend `WatchdogPrune` with the
 //! `pruneOneTeam(kind="operator-killed")` lifecycle hook (currently
 //! implicit in v3 via dashboard `POST /teams/:name/prune`).
@@ -25,7 +39,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use evy_core::Result;
+use evy_core::{Result, WorkerRegistry};
 
 use crate::report::{Finding, TickReport};
 use crate::team_registry::TeamRegistry;
@@ -35,12 +49,24 @@ use crate::trait_def::{Watchdog, WatchdogContext, WatchdogSchedule};
 /// Default cadence — defensive sweep every 30 seconds.
 pub const DEFAULT_TICK_INTERVAL_SECS: u64 = 30;
 
-/// Defensive sweep removing vanished tmux session references.
+/// Default terminal-worker reap grace — 15 minutes after a finished
+/// worker's last activity. MUST stay below
+/// [`crate::team_staleness::DEFAULT_STALE_THRESHOLD_SECS`] (30 min) so a
+/// finished worker's row retires before it could ever read as stale.
+pub const DEFAULT_TERMINAL_REAP_SECS: u64 = 900;
+
+/// Defensive sweep removing vanished tmux session references and (when
+/// given a worker registry) reaping terminal-status workers.
 pub struct WatchdogPrune {
     teams: Arc<dyn TeamRegistry>,
     tmux: Arc<dyn TmuxQuery>,
     /// Cadence the registry should fire this watchdog at.
     pub tick_interval_secs: u64,
+    /// When set, terminal-status workers older than
+    /// `terminal_reap_secs` are reaped from this registry each tick.
+    workers: Option<WorkerRegistry>,
+    /// Grace window for the terminal-worker reap.
+    pub terminal_reap_secs: u64,
 }
 
 impl WatchdogPrune {
@@ -51,6 +77,8 @@ impl WatchdogPrune {
             teams,
             tmux,
             tick_interval_secs: DEFAULT_TICK_INTERVAL_SECS,
+            workers: None,
+            terminal_reap_secs: DEFAULT_TERMINAL_REAP_SECS,
         }
     }
 
@@ -58,6 +86,21 @@ impl WatchdogPrune {
     #[must_use]
     pub fn with_tick_interval_secs(mut self, secs: u64) -> Self {
         self.tick_interval_secs = secs;
+        self
+    }
+
+    /// Arm the terminal-worker reap against the daemon's live worker
+    /// registry (W6 row ⑨ ruling — see module docs).
+    #[must_use]
+    pub fn with_worker_reap(mut self, workers: WorkerRegistry) -> Self {
+        self.workers = Some(workers);
+        self
+    }
+
+    /// Override the terminal-worker reap grace (seconds).
+    #[must_use]
+    pub fn with_terminal_reap_secs(mut self, secs: u64) -> Self {
+        self.terminal_reap_secs = secs;
         self
     }
 }
@@ -88,6 +131,21 @@ impl Watchdog for WatchdogPrune {
             findings.push(Finding::PrunedSession {
                 session: record.tmux_session,
             });
+        }
+
+        // Second duty (W6 row ⑨): retire finished workers whose grace
+        // window has elapsed. Sessions are untouched — see module docs.
+        if let Some(workers) = &self.workers {
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let max_age_ms = i64::try_from(self.terminal_reap_secs)
+                .unwrap_or(i64::MAX)
+                .saturating_mul(1000);
+            for record in workers.reap_terminal(now_ms, max_age_ms) {
+                findings.push(Finding::ReapedWorker {
+                    worker_id: record.id,
+                    session: record.tmux_session,
+                });
+            }
         }
 
         if findings.is_empty() {
@@ -161,6 +219,84 @@ mod tests {
         let r = w.tick(&ctx).await.unwrap();
         assert!(r.healthy);
         assert_eq!(r.findings, vec![Finding::Healthy]);
+    }
+
+    #[tokio::test]
+    async fn terminal_worker_outside_grace_is_reaped_session_untouched() {
+        use evy_core::{MandateId, ProviderKind, WorkerId, WorkerRecord, WorkerStatus};
+
+        let (ctx, _guards) = watchdog_ctx().await;
+        let workers = WorkerRegistry::new();
+        // Finished 20 minutes ago (grace is 15 min).
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut rec = WorkerRecord::running(
+            WorkerId::new(),
+            ProviderKind::ClaudeCode,
+            MandateId::new(),
+            now_ms - 20 * 60 * 1000,
+        );
+        rec.status = WorkerStatus::Succeeded;
+        rec.tmux_session = Some("claude-done".into());
+        let done_id = rec.id;
+        workers.register(rec);
+        // Still running, equally old — must survive.
+        let mut live = WorkerRecord::running(
+            WorkerId::new(),
+            ProviderKind::ClaudeCode,
+            MandateId::new(),
+            now_ms - 20 * 60 * 1000,
+        );
+        live.tmux_session = Some("claude-live".into());
+        let live_id = live.id;
+        workers.register(live);
+
+        let tmux = Arc::new(MockTmuxQuery::new());
+        tmux.set_sessions(["claude-done", "claude-live"]);
+        let w = WatchdogPrune::new(Arc::new(InMemoryTeamRegistry::new()), tmux.clone())
+            .with_worker_reap(workers.clone());
+        let r = w.tick(&ctx).await.unwrap();
+
+        assert!(r.healthy, "routine reap stays healthy");
+        match r.findings.as_slice() {
+            [Finding::ReapedWorker { worker_id, session }] => {
+                assert_eq!(*worker_id, done_id);
+                assert_eq!(session.as_deref(), Some("claude-done"));
+            }
+            other => panic!("expected one ReapedWorker, got {other:?}"),
+        }
+        assert!(workers.get(&done_id).is_none(), "terminal row retired");
+        assert!(workers.get(&live_id).is_some(), "running row survives");
+        // The hosting session is NOT killed by the reap.
+        assert!(tmux.session_exists("claude-done").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn fresh_terminal_worker_inside_grace_survives() {
+        use evy_core::{MandateId, ProviderKind, WorkerId, WorkerRecord, WorkerStatus};
+
+        let (ctx, _guards) = watchdog_ctx().await;
+        let workers = WorkerRegistry::new();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        // Finished 1 minute ago — well inside the 15-minute grace.
+        let mut rec = WorkerRecord::running(
+            WorkerId::new(),
+            ProviderKind::ClaudeCode,
+            MandateId::new(),
+            now_ms - 60 * 1000,
+        );
+        rec.status = WorkerStatus::Succeeded;
+        let id = rec.id;
+        workers.register(rec);
+
+        let w = WatchdogPrune::new(
+            Arc::new(InMemoryTeamRegistry::new()),
+            Arc::new(MockTmuxQuery::new()),
+        )
+        .with_worker_reap(workers.clone());
+        let r = w.tick(&ctx).await.unwrap();
+        assert!(r.healthy);
+        assert_eq!(r.findings, vec![Finding::Healthy]);
+        assert!(workers.get(&id).is_some(), "inside grace — not reaped");
     }
 
     #[tokio::test]

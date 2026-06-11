@@ -460,6 +460,11 @@ pub async fn run_daemon_with_shutdown(
     // session liveness. This is what makes the cockpit's `watchdog_ok` /
     // `watchdog_fire` / gc `team_event` frames flow on /api/evy/events in
     // production: emitters without boot registration never tick.
+    //
+    // W6 (rows ⑧⑨) — the default set now also arms WatchdogPrune (the
+    // defensive vanished-session sweep + terminal-worker reap over this
+    // same registry); IdlePaneWatchdog stays deliberately dormant — see
+    // `register_default_watchdogs` docs for both rulings.
     let worker_registry = WorkerRegistry::new();
     let watchdog_registry = Arc::new(evy_comms::WatchdogDiagRegistry::new());
     evy_watchdog::register_default_watchdogs(
@@ -471,6 +476,7 @@ pub async fn run_daemon_with_shutdown(
             worker_registry.clone(),
         )),
         Arc::new(evy_watchdog::RealTmuxQuery),
+        worker_registry.clone(),
     );
 
     // Phase 5 + 6 — optional skill registry. Loaded if `[skills]` is

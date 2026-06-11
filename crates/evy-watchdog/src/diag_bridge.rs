@@ -12,10 +12,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use evy_comms::{EventBroadcaster, TickFn, TickOutcome, WatchdogDiagRegistry, WatchdogSpec};
+use evy_core::WorkerRegistry;
 use evy_memory::ObservationLog;
 use evy_scheduler::Scheduler;
 
 use crate::heartbeat::{HeartbeatWatchdog, DEFAULT_HEARTBEAT_SECS};
+use crate::prune::WatchdogPrune;
 use crate::team_gc::TeamGcWatchdog;
 use crate::team_registry::TeamRegistry;
 use crate::team_staleness::TeamStalenessWatchdog;
@@ -31,13 +33,38 @@ use crate::trait_def::{Watchdog, WatchdogContext};
 ///   frame on `events` (the orchestration tab's live feed).
 /// - [`TeamGcWatchdog`] — sweeps teams whose tmux session is dead AND
 ///   whose activity is stale, emitting `team_event` frames on removal.
+/// - [`WatchdogPrune`] (armed W6, row ⑧ ruling) — the defensive sweep:
+///   removes teams whose session is unequivocally absent (no grace, no
+///   activity heuristic — deliberate overlap with gc, the layered
+///   defense that survived v3's production fire) and reaps
+///   terminal-status workers from `workers` after the 15-minute grace
+///   (row ⑨ ruling — see `prune` module docs).
+///
+/// # Deliberately NOT registered (W6 row ⑧ ruling)
+///
+/// [`crate::IdlePaneWatchdog`] stays dormant. Three reasons:
+/// 1. its findings feed nothing yet — the Phase 5 auto-retry gate and
+///    recently-sent-directives registry it was scaffolded for don't
+///    exist, and the diag bridge folds findings down to healthy/error,
+///    so arming it adds zero operator signal;
+/// 2. it enumerates by `claude-*` prefix-sniff over EVERY tmux session
+///    on the box — on an operator machine that includes human-attached
+///    panes, and capturing 50 lines of each every 30s is cost (and
+///    pane-content reads) with no consumer;
+/// 3. an idle pane is NORMAL on this fleet (operators park sessions),
+///    so the finding would be mostly noise until the buffered-prompt
+///    detection ports.
+///
+/// The impl + tests stay: they're the Phase 5 scaffold. Re-arm it here
+/// when `Provider::list_workers()` and the directive registry land.
 ///
 /// The team watchdogs read `teams` (the daemon passes a
 /// [`crate::WorkerTeamRegistry`] over its live worker registry) and
 /// probe session liveness through `tmux`. Cadences are each watchdog's
 /// crate default ([`TeamStalenessWatchdog`] 600s,
-/// [`TeamGcWatchdog`] 60s); the diag registry fires the first tick
-/// immediately at registration, so frames flow right after boot.
+/// [`TeamGcWatchdog`] 60s, [`WatchdogPrune`] 30s); the diag registry
+/// fires the first tick immediately at registration, so frames flow
+/// right after boot.
 ///
 /// The shared substrate (`scheduler`, `events`, `obs_log`) is folded
 /// into the [`WatchdogContext`] every tick receives; `providers` is left
@@ -52,6 +79,7 @@ pub fn register_default_watchdogs(
     obs_log: Arc<ObservationLog>,
     teams: Arc<dyn TeamRegistry>,
     tmux: Arc<dyn TmuxQuery>,
+    workers: WorkerRegistry,
 ) {
     let ctx = WatchdogContext {
         providers: Vec::new(),
@@ -73,7 +101,13 @@ pub fn register_default_watchdogs(
     );
     register_watchdog(
         registry,
-        Arc::new(TeamGcWatchdog::new(teams, tmux)),
+        Arc::new(TeamGcWatchdog::new(teams.clone(), tmux.clone())),
+        ctx.clone(),
+        true,
+    );
+    register_watchdog(
+        registry,
+        Arc::new(WatchdogPrune::new(teams, tmux).with_worker_reap(workers)),
         ctx,
         true,
     );
@@ -182,7 +216,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_set_arms_heartbeat_staleness_and_gc() {
+    async fn default_set_arms_heartbeat_staleness_gc_and_prune() {
         let (ctx, _guards) = watchdog_ctx().await;
         let mut rx = ctx.events.subscribe();
         let registry = WatchdogDiagRegistry::new();
@@ -193,11 +227,13 @@ mod tests {
             ctx.obs_log.clone(),
             Arc::new(InMemoryTeamRegistry::new()),
             Arc::new(MockTmuxQuery::new()),
+            WorkerRegistry::new(),
         );
 
-        // All three defaults are present with their crate-default
+        // All four defaults are present with their crate-default
         // cadences (the heartbeat's diag surface is UNCHANGED by the
-        // team-watchdog additions).
+        // team-watchdog additions). IdlePaneWatchdog is deliberately
+        // absent — see `register_default_watchdogs` docs (W6 row ⑧).
         let snap = registry.diag_snapshot(chrono::Utc::now());
         let expected = |id: &str| {
             snap.iter()
@@ -205,7 +241,11 @@ mod tests {
                 .unwrap_or_else(|| panic!("{id} registered"))
                 .expected_interval_seconds
         };
-        assert_eq!(snap.len(), 3);
+        assert_eq!(snap.len(), 4);
+        assert!(
+            !snap.iter().any(|w| w.id == "idle-pane"),
+            "idle-pane must stay dormant until its Phase 5 consumers land",
+        );
         assert_eq!(
             expected("heartbeat"),
             i64::try_from(DEFAULT_HEARTBEAT_SECS).ok()
@@ -217,6 +257,10 @@ mod tests {
         assert_eq!(
             expected("team-gc"),
             i64::try_from(crate::team_gc::DEFAULT_TICK_INTERVAL_SECS).ok()
+        );
+        assert_eq!(
+            expected("watchdog-prune"),
+            i64::try_from(crate::prune::DEFAULT_TICK_INTERVAL_SECS).ok()
         );
 
         // The diag registry fires the first tick immediately, so the

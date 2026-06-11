@@ -43,6 +43,17 @@ pub enum WorkerStatus {
     Cancelled,
 }
 
+impl WorkerStatus {
+    /// True for the states a worker never leaves — `Succeeded`,
+    /// `Failed`, `Cancelled`. Terminal records represent finished work:
+    /// the registry's reap sweep (W6 row ⑨) retires them after a grace
+    /// window instead of letting them feed the team watchdogs forever.
+    #[must_use]
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Succeeded | Self::Failed(_) | Self::Cancelled)
+    }
+}
+
 /// Caller-facing handle to a dispatched worker.
 ///
 /// Methods are async because most providers need an out-of-process round
