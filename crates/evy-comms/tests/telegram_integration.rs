@@ -10,7 +10,7 @@ use futures_util::StreamExt;
 use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use wiremock::matchers::{method, path, query_param};
+use wiremock::matchers::{body_partial_json, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use evy_comms::{
@@ -543,4 +543,41 @@ async fn inbound_message_surfaces_on_live_events_subscription() {
     shutdown.cancel();
     run_task.await.expect("run task joined");
     http_shutdown.cancel();
+}
+
+// W6 row ⑥ — `POST /api/settings/telegram` hot-apply. The handler calls
+// `apply_creds` on the live bridge after persisting config.toml; this pins
+// the bridge half: a send AFTER `apply_creds` must sign with the rotated
+// token and target the rotated chat, with no restart and no rebuild.
+#[tokio::test]
+async fn apply_creds_hot_swaps_token_and_chat_for_live_sends() {
+    let server = MockServer::start().await;
+
+    // Only the ROTATED token's sendMessage path is mounted. A send still
+    // signed with the boot token would hit an unmocked path (wiremock 404s
+    // it) and fail the notify — so success proves the live send path reads
+    // the hot-applied creds.
+    Mock::given(method("POST"))
+        .and(path("/botROTATED:tok/sendMessage"))
+        .and(body_partial_json(json!({ "chat_id": 67890 })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "result": {"message_id": 7}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let bridge = TelegramBridge::new(cfg(&server.uri()), Arc::new(AskRegistry::new()));
+    assert_eq!(bridge.chat_id(), CHAT_ID);
+
+    bridge.apply_creds("ROTATED:tok".to_string(), Some(67890));
+    assert_eq!(bridge.chat_id(), 67890);
+
+    bridge
+        .notify(Notification::Note {
+            text: "creds rotated".into(),
+        })
+        .await
+        .expect("notify after apply_creds must use the rotated creds");
 }

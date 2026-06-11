@@ -41,7 +41,7 @@
 //! and avoids burdening the operator with `/ask <id>` markers.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -148,11 +148,23 @@ pub struct TelegramBridge {
 
 struct Inner {
     config: TelegramConfig,
+    /// Live credentials, hot-swappable via [`TelegramBridge::apply_creds`]
+    /// (W6 row ⑥ — `POST /api/settings/telegram` applies without a daemon
+    /// restart). Seeded from `config` at construction; every send / poll /
+    /// inbound-auth read goes through here, while the timing knobs and the
+    /// inbound/events wiring stay boot-immutable on `config`.
+    creds: RwLock<Creds>,
     http: reqwest::Client,
     asks: Arc<AskRegistry>,
     /// `message_id` of an outbound ask → `AskId` so the inbound
     /// loop can resolve the registry on a Telegram reply.
     open_asks: Mutex<HashMap<i64, AskId>>,
+}
+
+/// The hot-swappable subset of [`TelegramConfig`].
+struct Creds {
+    bot_token: String,
+    chat_id: i64,
 }
 
 impl TelegramBridge {
@@ -169,6 +181,10 @@ impl TelegramBridge {
             .expect("reqwest client builder is infallible in this config");
         Self {
             inner: Arc::new(Inner {
+                creds: RwLock::new(Creds {
+                    bot_token: config.bot_token.clone(),
+                    chat_id: config.chat_id,
+                }),
                 config,
                 http,
                 asks,
@@ -177,12 +193,50 @@ impl TelegramBridge {
         }
     }
 
-    /// The chat id this bridge is configured to target. Surfaced in the
+    /// The chat id this bridge currently targets. Surfaced in the
     /// `POST /api/settings/telegram/test` response so the operator can confirm
     /// which chat the live bridge would message.
     #[must_use]
     pub fn chat_id(&self) -> i64 {
-        self.inner.config.chat_id
+        self.creds_snapshot().1
+    }
+
+    /// Hot-apply rotated credentials to the running bridge (W6 row ⑥).
+    ///
+    /// Takes effect on the next Bot API call: an in-flight `getUpdates`
+    /// long-poll completes against the old token (bounded by
+    /// `long_poll_timeout`), then the next poll / send uses the new values.
+    /// `chat_id = None` keeps the current chat. The caller owns persisting
+    /// `config.toml` — this swaps only the in-memory creds, so a daemon
+    /// restart still boots from whatever the file says.
+    pub fn apply_creds(&self, bot_token: String, chat_id: Option<i64>) {
+        let mut creds = self
+            .inner
+            .creds
+            .write()
+            .expect("telegram creds lock poisoned");
+        creds.bot_token = bot_token;
+        if let Some(id) = chat_id {
+            creds.chat_id = id;
+        }
+        // chat_id is operator-known, not a secret; the token must never
+        // reach a log line.
+        info!(
+            chat_id = creds.chat_id,
+            "telegram bridge: credentials hot-applied"
+        );
+    }
+
+    /// `(bot_token, chat_id)` under a short read lock. Writers only ever
+    /// perform plain field assignments, so poisoning is unreachable in
+    /// practice.
+    fn creds_snapshot(&self) -> (String, i64) {
+        let creds = self
+            .inner
+            .creds
+            .read()
+            .expect("telegram creds lock poisoned");
+        (creds.bot_token.clone(), creds.chat_id)
     }
 
     /// Send a [`Notification`] to the configured chat.
@@ -302,12 +356,13 @@ impl TelegramBridge {
     // ─── internals ──────────────────────────────────────────────────
 
     async fn send_message(&self, text: &str) -> Result<SendMessageResult> {
+        let (bot_token, chat_id) = self.creds_snapshot();
         let url = format!(
             "{}/bot{}/sendMessage",
-            self.inner.config.base_url, self.inner.config.bot_token
+            self.inner.config.base_url, bot_token
         );
         let body = serde_json::json!({
-            "chat_id": self.inner.config.chat_id,
+            "chat_id": chat_id,
             "text": text,
         });
         let resp = self
@@ -364,10 +419,8 @@ impl TelegramBridge {
     }
 
     async fn poll_once(&self, offset: i64) -> Result<Vec<TelegramUpdate>> {
-        let url = format!(
-            "{}/bot{}/getUpdates",
-            self.inner.config.base_url, self.inner.config.bot_token
-        );
+        let (bot_token, _) = self.creds_snapshot();
+        let url = format!("{}/bot{}/getUpdates", self.inner.config.base_url, bot_token);
         let mut req = self
             .inner
             .http
@@ -440,7 +493,7 @@ impl TelegramBridge {
 
         // Auth: drop messages from any chat other than the configured one.
         if let Some(chat) = &message.chat {
-            if chat.id != self.inner.config.chat_id {
+            if chat.id != self.chat_id() {
                 warn!(
                     chat_id = chat.id,
                     "telegram: dropping message from unauthorized chat"
@@ -593,6 +646,22 @@ mod tests {
         assert_eq!(c.chat_id, 1234);
         assert_eq!(c.base_url, "https://api.telegram.org");
         assert!(c.long_poll_timeout > Duration::from_secs(0));
+    }
+
+    #[test]
+    fn apply_creds_swaps_chat_and_none_keeps_current() {
+        let bridge = TelegramBridge::new(
+            TelegramConfig::new("tok".into(), 1234),
+            Arc::new(AskRegistry::new()),
+        );
+        assert_eq!(bridge.chat_id(), 1234);
+
+        bridge.apply_creds("tok2".into(), Some(5678));
+        assert_eq!(bridge.chat_id(), 5678);
+
+        // Token-only rotation must not clobber the chat.
+        bridge.apply_creds("tok3".into(), None);
+        assert_eq!(bridge.chat_id(), 5678);
     }
 
     #[test]
