@@ -787,6 +787,31 @@ fn build_router(
             "/api/terminal/attach",
             get(crate::terminal_ws::terminal_attach_handler),
         )
+        // W5 — Memory tab families served natively where v4 owns or can
+        // directly reach the data: Tier 1 file editors (same files the v3
+        // master re-reads fresh every turn), the bare Obsidian/vault status
+        // read, and thin forwards straight to the local Cognee/Memori
+        // sidecars. `/api/memory/{stats,recent,search,entries/*}` is backed
+        // by the v3 master's own evy.db (NOT claude-mem) and deliberately
+        // stays on the `/api/{*rest}` catch-all below, as does ALL of
+        // `/api/master/memory/*`. See `memory_http` module docs.
+        .route(
+            "/api/memory",
+            get(crate::memory_http::memory_overview_handler),
+        )
+        .route(
+            "/api/memory/tier1",
+            get(crate::memory_http::tier1_get_handler)
+                .post(crate::memory_http::tier1_post_handler),
+        )
+        .route(
+            "/api/cognee/{*rest}",
+            any(crate::memory_http::cognee_forward_handler),
+        )
+        .route(
+            "/api/memori/{*rest}",
+            any(crate::memory_http::memori_forward_handler),
+        )
         .route("/api/{*rest}", any(crate::proxy_http::reverse_proxy_handler));
 
     // Phase 4 Slice A: optionally serve the operator-console static
