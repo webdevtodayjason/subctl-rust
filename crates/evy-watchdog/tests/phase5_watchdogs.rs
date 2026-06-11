@@ -386,3 +386,118 @@ async fn team_event_reaches_live_events_subscription_on_gc_removal() {
 
     shutdown.cancel();
 }
+
+// ─── Wave 4 completion (watchdog boot): boot-style registration ──────────
+//
+// The suites above fire `Watchdog::tick` by hand. These go through
+// `register_default_watchdogs` — the daemon's EXACT boot path
+// (`evy::run_daemon_with_shutdown` → diag registry → immediate first
+// tick) — and prove the cockpit frames reach a live `/api/evy/events`
+// subscription with NO hand-built context and NO cadence overrides.
+// This is the regression sentinel for "the emitters exist but nothing
+// registers them at boot, so production never sees a watchdog frame."
+
+/// Boot-style harness: HTTP server + `register_default_watchdogs` over
+/// one shared broadcaster, returning the SSE stream + diag registry.
+async fn boot_default_watchdogs(
+    teams: Arc<InMemoryTeamRegistry>,
+    tmux: Arc<MockTmuxQuery>,
+) -> (
+    impl futures_util::Stream<
+            Item = Result<Event, eventsource_stream::EventStreamError<reqwest::Error>>,
+        > + Unpin,
+    evy_comms::WatchdogDiagRegistry,
+    CancellationToken,
+    (TempDir, TempDir),
+) {
+    let broadcaster = EventBroadcaster::new(64);
+    let (base, shutdown) = spawn_http(broadcaster.clone()).await;
+    let events = subscribe(&base).await;
+    let (ctx, s_dir, o_dir) = build_ctx(broadcaster.clone()).await;
+
+    let diag = evy_comms::WatchdogDiagRegistry::new();
+    evy_watchdog::register_default_watchdogs(
+        &diag,
+        ctx.scheduler.clone(),
+        broadcaster,
+        ctx.obs_log.clone(),
+        teams,
+        tmux,
+    );
+    (events, diag, shutdown, (s_dir, o_dir))
+}
+
+#[tokio::test]
+async fn boot_registration_streams_watchdog_fire_for_stale_team() {
+    let teams = Arc::new(InMemoryTeamRegistry::new());
+    teams.insert(TeamRecord {
+        team_id: "quiet".into(),
+        tmux_session: "claude-quiet".into(),
+        last_activity: Some(Utc::now() - ChronoDuration::hours(2)),
+    });
+    let tmux = Arc::new(MockTmuxQuery::new());
+    tmux.set_sessions(["claude-quiet"]);
+    let (mut events, diag, shutdown, _dirs) = boot_default_watchdogs(teams, tmux).await;
+
+    // The diag registry's immediate first tick → live `watchdog_fire`.
+    let data = next_named_frame(&mut events, "watchdog_fire").await;
+    assert_eq!(data["stale"], serde_json::json!(["quiet"]));
+    let prompt = data["prompt"].as_str().expect("prompt is a string");
+    assert!(prompt.contains("quiet"), "prompt names the team: {prompt}");
+    assert!(data["ts"].as_str().expect("ts").ends_with('Z'));
+
+    // Heartbeat + diag surface unchanged: all three defaults present,
+    // heartbeat at its crate-default cadence.
+    let snap = diag.diag_snapshot(Utc::now());
+    let mut ids: Vec<&str> = snap.iter().map(|w| w.id.as_str()).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, ["heartbeat", "team-gc", "team-staleness"]);
+
+    diag.shutdown();
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn boot_registration_streams_watchdog_ok_on_clean_pass() {
+    let teams = Arc::new(InMemoryTeamRegistry::new());
+    teams.insert(TeamRecord {
+        team_id: "fresh".into(),
+        tmux_session: "claude-fresh".into(),
+        last_activity: Some(Utc::now()),
+    });
+    let tmux = Arc::new(MockTmuxQuery::new());
+    tmux.set_sessions(["claude-fresh"]);
+    let (mut events, diag, shutdown, _dirs) = boot_default_watchdogs(teams, tmux).await;
+
+    let data = next_named_frame(&mut events, "watchdog_ok").await;
+    assert_eq!(data["teams_tracked"], 1);
+    assert_eq!(data["stale"], 0);
+    assert!(data["ts"].as_str().expect("ts").ends_with('Z'));
+
+    diag.shutdown();
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn boot_registration_streams_team_event_for_gc_removal() {
+    // TeamGcWatchdog is registered by the same boot path: a dead-session
+    // team is swept on the immediate first tick and the cockpit sees the
+    // `team_event` frame live.
+    let teams = Arc::new(InMemoryTeamRegistry::new());
+    teams.insert(TeamRecord {
+        team_id: "ghost".into(),
+        tmux_session: "claude-ghost".into(),
+        last_activity: None,
+    });
+    let tmux = Arc::new(MockTmuxQuery::new()); // no live sessions
+    let (mut events, diag, shutdown, _dirs) = boot_default_watchdogs(teams.clone(), tmux).await;
+
+    let data = next_named_frame(&mut events, "team_event").await;
+    assert_eq!(data["team"], "ghost");
+    assert_eq!(data["type"], "dead");
+    assert_eq!(data["text"], "tmux_session_gone:no_activity");
+    assert!(teams.is_empty(), "GC removed the team");
+
+    diag.shutdown();
+    shutdown.cancel();
+}

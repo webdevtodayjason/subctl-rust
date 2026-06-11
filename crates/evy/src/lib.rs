@@ -52,9 +52,11 @@
 //!
 //! # What's deliberately NOT here
 //!
-//! - **Worker registry.** `AppState::workers()` returns `Vec::new()`
-//!   until a dedicated worker pool ships. The dashboard already serves
-//!   the empty list correctly; populating is additive.
+//! - **A separate worker pool.** Cutover Phase 2 landed the shared
+//!   [`evy_core::WorkerRegistry`]: the spawn path registers workers,
+//!   `AppState::workers()` lists them, and Wave 4's team watchdogs read
+//!   a team-granular view of the same registry. There is no additional
+//!   pool abstraction beyond it.
 //! - **DeepSeek dispatch.** The stub returns `NotImplemented` at
 //!   dispatch — `deepseek-builder` is replacing it in a parallel slice.
 //! - **Thinking-partner surface.** `thinking-partner-builder` ships a
@@ -80,7 +82,7 @@ use chrono::Utc;
 use evy_comms::{
     AskRegistry, DaemonEvent, DiscordBridge, EventBroadcaster, HttpServer, TelegramBridge,
 };
-use evy_core::Provider;
+use evy_core::{Provider, WorkerRegistry};
 use evy_memory::{
     observation::ObservationKind, FeedbackIngest, NaiveRetriever, Observation, ObservationLog,
     OperatorPreferenceModel, PlaybookStore, ScoreLedger,
@@ -448,15 +450,27 @@ pub async fn run_daemon_with_shutdown(
     let ask_registry = Arc::new(AskRegistry::new());
 
     // W5 — boot the watchdog diagnostics registry and arm the framework's
-    // HeartbeatWatchdog so `/api/evy/watchdogs/diag` reports a real ticking
-    // watchdog. Registration-only: the registry owns its per-watchdog tick
+    // default set so `/api/evy/watchdogs/diag` reports real ticking
+    // watchdogs. Registration-only: the registry owns its per-watchdog tick
     // tasks under its own cancellation token; we cancel them in the drain.
+    //
+    // Wave 4 (watchdog boot) — the team watchdogs (staleness + gc) read a
+    // team-granular view over the SAME worker registry the spawn path
+    // writes (`DaemonAppState::spawn_worker`), and probe live tmux for
+    // session liveness. This is what makes the cockpit's `watchdog_ok` /
+    // `watchdog_fire` / gc `team_event` frames flow on /api/evy/events in
+    // production: emitters without boot registration never tick.
+    let worker_registry = WorkerRegistry::new();
     let watchdog_registry = Arc::new(evy_comms::WatchdogDiagRegistry::new());
     evy_watchdog::register_default_watchdogs(
         &watchdog_registry,
         scheduler.clone(),
         event_broadcaster.clone(),
         obs_log.clone(),
+        Arc::new(evy_watchdog::WorkerTeamRegistry::new(
+            worker_registry.clone(),
+        )),
+        Arc::new(evy_watchdog::RealTmuxQuery),
     );
 
     // Phase 5 + 6 — optional skill registry. Loaded if `[skills]` is
@@ -549,6 +563,10 @@ pub async fn run_daemon_with_shutdown(
     // Phase 2 (2j) — share the SSE broadcaster so spawn_worker emits
     // WorkerRegistered onto the same bus the HTTP server serves.
     app_state = app_state.with_event_broadcaster(event_broadcaster.clone());
+    // Wave 4 (watchdog boot) — share the worker registry the team
+    // watchdogs were registered over, so the spawn path and the
+    // staleness/gc sweeps see the same rows.
+    app_state = app_state.with_worker_registry(worker_registry);
     // W5 — hand the diag registry to the HTTP surface.
     app_state = app_state.with_watchdog_diag(watchdog_registry.clone());
     let app_state = Arc::new(app_state);

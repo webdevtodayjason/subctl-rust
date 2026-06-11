@@ -103,7 +103,7 @@ pub use prune::WatchdogPrune;
 pub use registry::WatchdogRegistry;
 pub use report::{Finding, TickReport};
 pub use team_gc::TeamGcWatchdog;
-pub use team_registry::{InMemoryTeamRegistry, TeamRecord, TeamRegistry};
+pub use team_registry::{InMemoryTeamRegistry, TeamRecord, TeamRegistry, WorkerTeamRegistry};
 pub use team_staleness::{TeamStalenessConfig, TeamStalenessWatchdog};
 pub use tmux_query::{MockTmuxQuery, RealTmuxQuery, TmuxQuery};
 pub use trait_def::{Watchdog, WatchdogContext, WatchdogSchedule};
