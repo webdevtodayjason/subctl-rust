@@ -115,6 +115,8 @@ pub mod notifications_http;
 pub mod attachments_http;
 // ── W5: watchdog diagnostics surface (diag + restart + kill) ──
 pub mod watchdogs_http;
+// ── W5: Memory tab families (tier1 + obsidian state + sidecar forwards) ──
+pub mod memory_http;
 
 // ── Public re-exports — the surface the daemon binary consumes ───────
 
