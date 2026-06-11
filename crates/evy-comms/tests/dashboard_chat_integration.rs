@@ -164,7 +164,7 @@ async fn ui_dialect_acks_ok_and_streams_named_frames_onto_events_bus() {
                 deltas.push_str(s);
             }
         }
-        if frame.event == "message_end" {
+        if frame.event == "agent_end" {
             break;
         }
     }
@@ -175,6 +175,19 @@ async fn ui_dialect_acks_ok_and_streams_named_frames_onto_events_bus() {
     assert!(
         names.contains(&"message_end".to_string()),
         "expected a message_end terminator, saw {names:?}"
+    );
+    // The v3-master `agent_end` alias must IMMEDIATELY follow message_end —
+    // it's what releases chat.js's per-project one-shot captures
+    // (attachOneShotAssistantCapture closes its EventSource only on
+    // agent_end).
+    let end_pos = names
+        .iter()
+        .position(|n| n == "message_end")
+        .expect("message_end position");
+    assert_eq!(
+        names.get(end_pos + 1).map(String::as_str),
+        Some("agent_end"),
+        "agent_end must immediately follow message_end, saw {names:?}"
     );
     assert!(
         deltas.contains("hello from evy"),

@@ -5,13 +5,18 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use eventsource_stream::Eventsource;
+use futures_util::StreamExt;
 use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use evy_comms::{AskRegistry, InboundMessage, Notification, TelegramBridge, TelegramConfig};
+use evy_comms::{
+    AskRegistry, EventBroadcaster, HttpConfig, HttpServer, InboundMessage, Notification,
+    TelegramBridge, TelegramConfig,
+};
 use evy_core::{ProviderKind, WorkerId};
 
 const TOKEN: &str = "TESTTOKEN";
@@ -451,4 +456,91 @@ async fn plain_message_after_timed_out_ask_resolves_the_new_one() {
 
     shutdown.cancel();
     run_task.await.expect("run task joined");
+}
+
+// ── dashboard live feed: named `inbound` frame (Wave 4 orch events) ──────
+
+/// An authorized non-reply operator message must surface on a LIVE
+/// `/api/evy/events` subscription as the named `inbound` frame the
+/// dashboard cockpit listens for (`orch.js:439` parses `{source, text}`).
+/// The HTTP server and the bridge share ONE broadcaster — the daemon's
+/// exact wiring; the Bot API stays wiremocked.
+#[tokio::test]
+async fn inbound_message_surfaces_on_live_events_subscription() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path(format!("/bot{TOKEN}/getUpdates")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "result": [{
+                "update_id": 1,
+                "message": {
+                    "message_id": 7,
+                    "text": "deploy the thing",
+                    "chat": {"id": CHAT_ID},
+                    "from": {"id": 99, "first_name": "Jason"}
+                }
+            }]
+        })))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/bot{TOKEN}/getUpdates")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true, "result": []})))
+        .mount(&server)
+        .await;
+
+    let broadcaster = EventBroadcaster::new(64);
+    let http = HttpServer::with_stub_state(HttpConfig::ephemeral(), broadcaster.clone());
+    let bound = http.bind().await.expect("bind");
+    let addr = bound.local_addr();
+    let http_shutdown = CancellationToken::new();
+    let http_shutdown_for_serve = http_shutdown.clone();
+    tokio::spawn(async move {
+        let _ = bound.serve(http_shutdown_for_serve).await;
+    });
+
+    // Subscribe FIRST — broadcast only reaches current subscribers.
+    let events_res = reqwest::Client::new()
+        .get(format!("http://{addr}/api/evy/events"))
+        .header("Accept", "text/event-stream")
+        .send()
+        .await
+        .expect("events GET");
+    assert_eq!(events_res.status(), 200);
+    let mut events = events_res.bytes_stream().eventsource();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let mut c = cfg(&server.uri());
+    c.events = Some(broadcaster);
+    let bridge = TelegramBridge::new(c, Arc::new(AskRegistry::new()));
+
+    let shutdown = CancellationToken::new();
+    let bridge_for_run = bridge.clone();
+    let shutdown_for_run = shutdown.clone();
+    let run_task = tokio::spawn(async move {
+        bridge_for_run.run(shutdown_for_run).await.expect("run ok");
+    });
+
+    // The named frame arrives carrying the orch.js contract fields.
+    let frame = loop {
+        let frame = tokio::time::timeout(Duration::from_secs(3), events.next())
+            .await
+            .expect("inbound frame timed out")
+            .expect("event stream ended")
+            .expect("event stream errored");
+        if frame.event == "inbound" {
+            break frame;
+        }
+    };
+    let data: serde_json::Value = serde_json::from_str(&frame.data).expect("frame data json");
+    assert_eq!(data["source"], "telegram");
+    assert_eq!(data["text"], "deploy the thing");
+    assert!(data["ts"].as_str().unwrap().ends_with('Z'));
+
+    shutdown.cancel();
+    run_task.await.expect("run task joined");
+    http_shutdown.cancel();
 }

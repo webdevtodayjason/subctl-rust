@@ -80,6 +80,7 @@ use uuid::Uuid;
 
 use crate::events::DaemonEvent;
 use crate::http::HttpState;
+use crate::sse::EventBroadcaster;
 
 /// JSON body the operator's chat client POSTs.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -355,8 +356,20 @@ async fn handle_ui_chat(state: HttpState, ui: UiChatRequest) -> Response {
     (StatusCode::OK, Json(json!({ "ok": true }))).into_response()
 }
 
+/// Terminate a dashboard turn on the events bus: `message_end` finalises the
+/// chat tab's reply bubble, and the `agent_end` alias that MUST immediately
+/// follow lets the per-project one-shot captures
+/// (`chat.js` `attachOneShotAssistantCapture`) close their EventSource
+/// instead of leaking until their 90s safety timeout. Always emit the pair
+/// through this helper so no turn-end path can drop the alias.
+fn emit_turn_end(broadcaster: &EventBroadcaster) {
+    broadcaster.emit(DaemonEvent::dashboard_message_end());
+    broadcaster.emit(DaemonEvent::dashboard_agent_end());
+}
+
 /// Drive ONE dashboard chat turn and stream it onto the events bus as the
-/// v3-named frames (`message_start` → `message_update`* → `message_end`).
+/// v3-named frames (`message_start` → `message_update`* → `message_end` +
+/// `agent_end`).
 /// Mirrors the BFF's `streamV4Turn`: uses/creates the shared current session,
 /// honours the `/plan` trigger, and on completion adopts the resulting session
 /// id so the next turn continues it (and session-less transcript/context/util
@@ -370,7 +383,7 @@ async fn run_dashboard_turn(state: HttpState, text: String) {
         broadcaster.emit(DaemonEvent::dashboard_message_update(
             "\n⚠️ thinking-partner is not configured for this daemon",
         ));
-        broadcaster.emit(DaemonEvent::dashboard_message_end());
+        emit_turn_end(&broadcaster);
         return;
     };
 
@@ -434,20 +447,20 @@ async fn run_dashboard_turn(state: HttpState, text: String) {
             // the exchange), then adopt the session as the current one.
             partner.save_all().await;
             state.set_chat_session(sid);
-            broadcaster.emit(DaemonEvent::dashboard_message_end());
+            emit_turn_end(&broadcaster);
         }
         Ok(Err(err)) => {
             broadcaster.emit(DaemonEvent::dashboard_message_update(&format!(
                 "\n⚠️ {}",
                 chat_error_display(&err)
             )));
-            broadcaster.emit(DaemonEvent::dashboard_message_end());
+            emit_turn_end(&broadcaster);
         }
         Err(join_err) => {
             broadcaster.emit(DaemonEvent::dashboard_message_update(&format!(
                 "\n⚠️ partner task panicked: {join_err}"
             )));
-            broadcaster.emit(DaemonEvent::dashboard_message_end());
+            emit_turn_end(&broadcaster);
         }
     }
 }
