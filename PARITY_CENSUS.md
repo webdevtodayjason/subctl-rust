@@ -46,7 +46,7 @@ v4 (:8797) fronts everything; routes marked `proxied` ride `/api/{*rest}` → v3
 | 17 | `/api/models/refresh` | POST | dashboard | native | done | W1 |
 | 18 | `/api/projects` | GET | dashboard | native | done | W3 (0.2s vs Bun 13.8s) |
 | 19 | `/api/logs/sources` | GET | dashboard (launchd log files) | proxied | W6 | file-backed read; cheap native port |
-| 20 | `/api/logs/{source}` + `/stream` (SSE) | GET | dashboard | proxied | W6 | same latent-SSE class as `/api/update/events` (catch-all can't stream) — verify during W6 sweep |
+| 20 | `/api/logs/{source}` + `/stream` (SSE) | GET | dashboard | proxied | done (W6) | was CONDITIONALLY lazy (immediate only on clean log read; missing/rotated file hung head to 25s ka) — fixed in PR #57 `: open` sweep; live-verified instant on both ports 2026-06-11 |
 | 21 | `/api/audit/aggregate` | GET | dashboard (policy audit JSONLs) | proxied | long-tail | policy-audit family; evy-policy crate exists, audit files on disk |
 | 22 | `/api/policy/teams` | GET | dashboard | proxied | long-tail | |
 | 23 | `/api/policy/list` | GET | dashboard | proxied | long-tail | |
@@ -58,7 +58,7 @@ v4 (:8797) fronts everything; routes marked `proxied` ride `/api/{*rest}` → v3
 | 29 | `/api/skills/sources` | GET | dashboard | proxied | long-tail | |
 | 30 | `/api/skills/{id}` | GET | dashboard | proxied | long-tail | |
 | 31 | `/api/skills/import` | POST | dashboard | proxied | long-tail | mutation (git clone into catalog) |
-| 32 | `/api/skills/categorized` | GET | dashboard | proxied | long-tail | |
+| 32 | `/api/skills/categorized` | GET | dashboard | proxied | done (W6) | was 400 — catch-all shadowing in v3; fixed v3-side (PR #56), live 200 both ports 2026-06-11 |
 | 33 | `/api/skills/evy/{id}` | GET | dashboard (evy-authored drafts) | proxied | long-tail | pairs with Evy-agency authoring tools |
 | 34 | `/api/skills/evy/{id}/promote` | POST | dashboard | proxied | long-tail | |
 | 35 | `/api/skills/evy/{id}/delete` | POST | dashboard | proxied | long-tail | |
@@ -68,7 +68,7 @@ v4 (:8797) fronts everything; routes marked `proxied` ride `/api/{*rest}` → v3
 | 39 | `/api/settings/secrets` | GET | dashboard | proxied | W7-prep | evy-secrets crate is the native substrate |
 | 40 | `/api/settings/secrets/{key}` | POST, DELETE | dashboard | proxied | W7-prep | secrets writes |
 | 41 | `/api/settings/oauth` | GET | dashboard | native | done | W2 |
-| 42 | `/api/settings/telegram` | POST | dashboard | native | done | W2 mutation parity |
+| 42 | `/api/settings/telegram` | POST | dashboard | native | done | W2 mutation parity; W6: hot-applies creds to live bridge (43f0c0f), boot-absent bridge stays restart-required (documented) |
 | 43 | `/api/settings/telegram/test` | POST | dashboard | native | done | W2 |
 | 44 | `/api/settings/config/{name}` | GET | dashboard (redacted config files) | native | done | W2; GET-only in v3 (verified server.ts:4363) |
 | 45 | `/api/projects/create` | POST | dashboard | native | done | W3 |
@@ -81,7 +81,7 @@ v4 (:8797) fronts everything; routes marked `proxied` ride `/api/{*rest}` → v3
 | 52 | `/api/memory` (bare) | GET | dashboard (Obsidian + vault state) | native | done (W5) | S2 shipped |
 | 53 | `/api/version` | GET | dashboard | native | done | |
 | 54 | `/api/update/check` | GET | dashboard (install tree + git) | proxied | W7-prep | install-coupled |
-| 55 | `/api/update/events` (SSE) | GET | dashboard | proxied (**LATENT: dark through catch-all — pre-existing, closet-logged**) | W6 | already assigned to W6 in the W4 close-out |
+| 55 | `/api/update/events` (SSE) | GET | dashboard | proxied | done (W6) | ROOT CAUSE: Bun lazy head (never the proxy) — v4 SSE head-grace (9091a6c) + v3 `: open` fix-at-source (PR #57); bare-curl proven both ports 2026-06-11 |
 | 56 | `/api/update/run` | POST | dashboard | proxied | W7-prep | self-update of the v3 install — replaced by v4 deploy story |
 | 57 | `/api/providers` | GET | dashboard (pi-ai npm catalog) | proxied | long-tail | W1 ruling: pi-ai data has no Rust port — **operator checkpoint** (port effort = days) |
 | 58 | `/api/catalogs` | GET | dashboard (pi-ai) | proxied | long-tail | |
@@ -103,7 +103,7 @@ v4 (:8797) fronts everything; routes marked `proxied` ride `/api/{*rest}` → v3
 | 74 | `/api/evy/restart` | POST | dashboard (launchctl kickstart) | proxied | W7-prep | restart semantics flip to the v4 daemon at retirement |
 | 75 | `/api/notifications/*` (browser-bare, incl. `/stream` SSE) | GET, POST | dashboard → master | proxied | W7-prep | native canonical `/api/evy/notifications` family exists (W6-sprint); bare repoint + stream port at retirement |
 | 76 | `/api/voice/*` (incl. `/audio/{file}`) | GET, POST | dashboard → master | proxied | long-tail | W5 non-goal; evy-voice crate is the native substrate, HTTP surface unported |
-| 77 | `/api/preferences/*` | GET, POST | dashboard → master | proxied (**DEAD: master has zero `/preferences` routes — live-probed 404 "not found"**) | W6 | latent restoration: decide restore-in-v4 vs declare-dead; `subctl prefs` CLI reads the TOML directly and works |
+| 77 | `/api/preferences/*` | GET, POST | dashboard → master | proxied | done (W6) | RESTORED v3-side (PR #56): module existed complete since v2.8.1, never mounted; mounted + tools registered (79→81); live 200 end-to-end both ports 2026-06-11 |
 | 78 | `/api/upstreams` + `/check` `/history` `/update` `/auto-update/toggle` | GET, POST | dashboard → master | proxied | long-tail | **Contestable: pi-ai/pi-agent-core npm upstreams are v3-stack concepts — candidate for retire-with-v3 instead of port** |
 | 79 | `/api/cognee/*` | any | dashboard → Cognee sidecar (:8745, `SUBCTL_COGNEE_PORT`) | native | done (W5) | S2 shipped — thin native forward |
 | 80 | `/api/memori/*` | any | dashboard → Memori sidecar (:8746, `SUBCTL_MEMORI_PORT`) | native | done (W5) | S2 shipped — thin native forward |
@@ -231,7 +231,7 @@ v4 (:8797) fronts everything; routes marked `proxied` ride `/api/{*rest}` → v3
 | watchdogs.ts | watchdog_list, watchdog_kill (2) | enumerate/kill registered watchdogs | — | absent | Evy-agency | substrate native: WatchdogDiagRegistry |
 | evy-memory.ts | evy_recall, evy_remember (2) | Tier-3 conversational memory | — | absent | Evy-agency | substrate native: evy-memory observation log |
 | voice-render.ts | voice_render, voice_status (2) | TTS render | voice.json enabled | absent | Evy-agency | substrate native: evy-voice crate |
-| **preferences.ts** | evy_get_preferences, evy_set_preference, evy_get_preference_value (3) | operator preferences | — | absent (**UNWIRED in v3 too** — module never imported by server.ts) | long-tail | **finding:** dead module; decide port-or-drop with the `/api/preferences` dead route (1a #77) |
+| **preferences.ts** | evy_get_preferences, evy_set_preference, evy_get_preference_value (3) | operator preferences | — | v3-wired (W6: mounted + 2 tools registered, PR #56) | Evy-agency | port with agency wave; NOTE closet #424: renderPreferencesForPrompt still never injected — Evy sets prefs she can't see |
 | **team-templates.ts** | subctl_team_template_list, subctl_team_template_show, subctl_team_dispatch (3) | team-template list/show/dispatch | — | absent (**UNWIRED in v3 too** — never imported) | long-tail | **finding:** dead module; template CRUD already v4-native, dispatch tool = Evy-agency candidate |
 
 **Totals:** 30 modules, 105 defined tools, **99 wired** (28 modules) + **6 unwired** (2 dead modules). MCP server (`mcp/`) re-exports registry tools — censused as runtime row 4.14 / Class 1b #1.
