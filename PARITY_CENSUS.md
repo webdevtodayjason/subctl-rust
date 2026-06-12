@@ -363,6 +363,7 @@ Owner today = v3 bash CLI (`lib/*.sh`) for every row. v4 status = `proxied` (shi
 | Wave | Rows | Headline contents |
 |---|---|---|
 | **W5** (CLOSED — S2 verified) | 0 remaining | 4 rows shipped native (memory tier1, bare /api/memory, cognee + memori thin forwards); 6 rows (/api/memory/{stats,recent,search,entries,{id}} both dialects) re-rowed to Evy-agency-or-later after the S2 tripwire (master-owned SQLite store) |
+| **EA1** (2026-06-12) | agency wave 1 SHIPPED: backend-neutral tool loop + live-status injection + 8 tools (evy_usage/sessions/workers/watchdogs/accounts + spawn[claude-only]/kill/notify) — live-proven incl. dispatch-through-chat on the gemma pin; remaining agency rows (memory-store family ownership-blocked, gh/linear/web/etc.) = later waves |
 | **W6** | 10 (+1 note-level latent) | latent SSEs (/api/update/events, logs/stream, notifications/stream), dead /api/preferences restoration, vault browser family, logs reads, arm idle-pane + prune watchdogs, tier1 config-dir symlink + `$HOME` hardcode fix (carried as note on 1a #47) |
 | **Evy-agency** | 40 | all 28 wired tool modules (99 tools), /api/teams/tools, inbox poll, follow-up ticker, background-runs, circuit breaker, + 6 master-memory-store routes (Evy-agency-or-later, ownership-blocked) |
 | **long-tail** | ~100 | skills panel family, policy/audit family, providers/catalogs (pi-ai ⚠), auth flows, voice family, memory kernel + tier1 workflow + backfills, local-backend, personality/profile, upstreams ⚠, MCP server, master live-teams view, most CLI verbs |
