@@ -32,6 +32,28 @@ const SCOPE: TmuxScope = TmuxScope(ProviderKind::ClaudeCode);
 /// The primary wait is now [`wait_for_claude_ready`] (poll), not this sleep.
 const CLAUDE_BOOT_SLEEP: Duration = Duration::from_secs(2);
 
+/// Beat between the directive paste and the submitting Enter. Pasting and
+/// submitting in the same breath raced the TUI's paste ingestion — the
+/// Enter could land while the composer was still consuming the buffer
+/// (W6.5 mandate-loss fix, closet entry 2026-06-11).
+const PASTE_TO_ENTER_BEAT: Duration = Duration::from_millis(500);
+
+/// Upper bound on deliberate trust-dialog dismissals during one
+/// ready-wait. A dialog that survives this many Enter presses is wedged;
+/// keep polling instead of key-spamming an unknown screen.
+const MAX_DIALOG_DISMISSALS: u32 = 3;
+
+/// Substrings that identify Claude Code's directory-trust dialog. The
+/// dialog renders a `❯` selector — which is exactly why a bare-`❯` ready
+/// heuristic mistook it for the composer (see [`PaneState::TrustDialog`]).
+const CLAUDE_DIALOG_MARKERS: [&str; 2] = ["Do you trust", "Yes, proceed"];
+
+/// Substrings that only render once the composer is actually accepting
+/// input: the `Try "` empty-composer placeholder, the `? for shortcuts`
+/// hint under the input box, and the `⏵` mode chevron in the status line.
+/// Deliberately NO bare `❯` count — the trust dialog satisfies that.
+const CLAUDE_READY_MARKERS: [&str; 3] = ["Try \"", "? for shortcuts", "⏵"];
+
 /// Status-poll interval inside [`ClaudeCodeWorker::wait`].
 const WAIT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -142,6 +164,30 @@ impl Provider for ClaudeCodeProvider {
             "spawning Claude Code worker (HMAC-wrapped directive)"
         );
 
+        // W6.5 ① — provable mandate delivery, part 1 (race-free prevention):
+        // (a) pre-trust the working dir in the account's .claude.json so the
+        //     directory-trust dialog never renders for this spawn (the dialog
+        //     is what silently swallowed the paste in the 2026-06-11 live
+        //     reproductions);
+        // (b) drop the session HMAC key into the worker's config dir so it
+        //     can authenticate envelopes via `subctl directive verify`.
+        // Both are best-effort: a failure degrades to the in-loop dialog
+        // dismissal / in-prompt trust contract, never to a lost spawn.
+        if let Err(err) =
+            pre_trust_project_dir(&self.config.claude_config_dir, &self.config.working_dir)
+        {
+            tracing::warn!(
+                %err,
+                "failed to pre-trust working dir in .claude.json; relying on dialog dismissal"
+            );
+        }
+        if let Err(err) = provision_directive_key(&self.config.claude_config_dir, key) {
+            tracing::warn!(
+                %err,
+                "failed to provision .subctl-directive-key; worker-side `subctl directive verify` will need --key-file"
+            );
+        }
+
         tmux::new_window(
             SCOPE,
             &self.config.tmux_session,
@@ -171,12 +217,14 @@ impl Provider for ClaudeCodeProvider {
         .await?;
         tmux::press_enter(SCOPE, &self.config.tmux_session, &window_name).await?;
 
-        // 2h — wait for Claude's input box to actually be READY before pasting,
-        // by polling the pane (not a fixed sleep, which raced the ~8-10s TUI
-        // boot and silently dropped the directive). A short settle follows.
-        let ready_target = format!("{}:{}", self.config.tmux_session, window_name);
-        if !wait_for_claude_ready(&ready_target).await {
-            tracing::warn!(window = %window_name, "claude ready-marker not seen in time; pasting anyway");
+        // 2h / W6.5 ① — wait for Claude's COMPOSER to actually be ready
+        // before pasting, by polling the pane (not a fixed sleep, which
+        // raced the ~8-10s TUI boot). The wait dismisses the trust dialog
+        // deliberately if it appears, and never declares ready on a dialog
+        // screen (the old bare-`❯`-count heuristic did exactly that and
+        // silently lost the mandate). A short settle follows.
+        if !wait_for_claude_ready(&self.config.tmux_session, &window_name).await {
+            tracing::warn!(window = %window_name, "claude ready composer not seen in time; pasting anyway");
         }
         sleep(CLAUDE_BOOT_SLEEP).await;
 
@@ -189,6 +237,39 @@ impl Provider for ClaudeCodeProvider {
             &directive,
         )
         .await?;
+        info!(
+            worker = ?worker_id,
+            window = %window_name,
+            directive_bytes = directive.len(),
+            "directive paste complete; checking delivery before submit"
+        );
+
+        // W6.5 ① — provable delivery, part 2: a beat between paste and
+        // Enter, then a pane capture that must show the directive head (or
+        // the TUI's collapsed paste placeholder). Silent loss is no longer
+        // possible: every spawn either logs delivery or warns loudly.
+        sleep(PASTE_TO_ENTER_BEAT).await;
+        let paste_target = format!("{}:{}", self.config.tmux_session, window_name);
+        match tmux::tmux_capture(&paste_target, 80).await {
+            Some(pane) if directive_visible(&pane) => {
+                info!(window = %window_name, "directive visible in composer; submitting");
+            }
+            Some(pane) => {
+                let tail: Vec<&str> = pane.lines().rev().take(5).collect();
+                let tail = tail.into_iter().rev().collect::<Vec<_>>().join(" | ");
+                tracing::warn!(
+                    window = %window_name,
+                    pane_tail = %tail,
+                    "POST-PASTE CHECK FAILED — directive not visible in pane; the mandate may have been swallowed (dialog race?). Submitting anyway; inspect this worker"
+                );
+            }
+            None => {
+                tracing::warn!(
+                    window = %window_name,
+                    "post-paste pane capture failed; cannot prove directive delivery"
+                );
+            }
+        }
         tmux::press_enter(SCOPE, &self.config.tmux_session, &window_name).await?;
 
         let handle = ClaudeCodeWorker {
@@ -397,28 +478,190 @@ fn path_to_arg(p: &Path) -> Result<String> {
         })
 }
 
-/// Build the worker launch command: an inline `CLAUDE_CONFIG_DIR=…`
-/// assignment followed by the `claude` binary invoked by ABSOLUTE path
-/// (never `command claude`), so the spawned worker resolves the same
-/// native binary regardless of the tmux/launchd PATH.
-/// Cutover Phase 2 (2h) — poll the worker pane until Claude's input box is ready
-/// before pasting the directive. Looks for the `⏵` mode chevron or the `Try "`
-/// empty-input placeholder (or a second `❯` prompt beyond the launch line).
-/// Polls every 500ms up to ~40s; returns whether ready was observed (caller
-/// pastes regardless, degrading to the old fixed-sleep behavior on timeout).
-/// Replaces the fixed `CLAUDE_BOOT_SLEEP` that raced the ~8-10s TUI boot and
-/// silently dropped the paste (surfaced by the criterion-#7 live run).
-async fn wait_for_claude_ready(target: &str) -> bool {
+/// What a captured worker pane is currently showing, as far as directive
+/// delivery is concerned. Derived by [`classify_claude_pane`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaneState {
+    /// The directory-trust dialog is on screen. Pasting now LOSES the
+    /// directive: the paste is swallowed by the dialog and the trailing
+    /// Enter accepts it. This was the silent mandate-loss mechanism
+    /// (W6-D conversion act, 2026-06-11): the dialog renders a `❯`
+    /// selector which, plus the shell launch-line `❯`, satisfied the old
+    /// `matches('❯').count() >= 2` heuristic DURING the dialog.
+    TrustDialog,
+    /// The composer is ready for input.
+    Ready,
+    /// Still booting (banner, spinner, blank pane).
+    Booting,
+}
+
+/// Classify a captured pane. Dialog detection takes precedence over
+/// ready detection — a dialog screen must NEVER classify as ready, no
+/// matter what else has scrolled into view. Pure; unit-tested against
+/// fixtures of the live failure screens.
+fn classify_claude_pane(pane: &str) -> PaneState {
+    if CLAUDE_DIALOG_MARKERS.iter().any(|m| pane.contains(m)) {
+        return PaneState::TrustDialog;
+    }
+    if CLAUDE_READY_MARKERS.iter().any(|m| pane.contains(m)) {
+        return PaneState::Ready;
+    }
+    PaneState::Booting
+}
+
+/// Post-paste delivery check: is the pasted directive actually visible in
+/// the pane? Every dispatched directive starts with the HMAC trust-marker
+/// line, so its `subctl-master directive` ident is the head we look for.
+/// Large pastes may render as the TUI's collapsed placeholder
+/// (`[Pasted text #1 +N lines]`) instead of the literal text — that
+/// counts as delivered too. Shared with the Codex adapter.
+pub(crate) fn directive_visible(pane: &str) -> bool {
+    pane.contains("subctl-master directive") || pane.contains("Pasted text")
+}
+
+/// Cutover Phase 2 (2h), hardened in W6.5 ① — poll the worker pane until
+/// Claude's composer is ready before pasting the directive.
+///
+/// - Ready = a composer-specific marker ([`CLAUDE_READY_MARKERS`]) with NO
+///   dialog marker on screen. Never a bare `❯` count — the trust dialog
+///   renders one and the old heuristic pasted straight into it.
+/// - The directory-trust dialog, if it appears despite the config
+///   pre-trust ([`pre_trust_project_dir`]), is dismissed deliberately:
+///   `1` (select "Yes, proceed") then Enter, at most
+///   [`MAX_DIALOG_DISMISSALS`] times.
+///
+/// Polls every 500ms up to ~40s; returns whether ready was observed
+/// (caller pastes regardless, degrading to the old fixed-sleep behavior
+/// on timeout — with the post-paste check downstream to make any loss
+/// loud).
+async fn wait_for_claude_ready(session: &str, window: &str) -> bool {
+    let target = format!("{session}:{window}");
+    let mut dismissals = 0u32;
     for _ in 0..80 {
-        if let Some(pane) = tmux::tmux_capture(target, 80).await {
-            if pane.contains('⏵') || pane.contains("Try \"") || pane.matches('❯').count() >= 2 {
-                return true;
+        if let Some(pane) = tmux::tmux_capture(&target, 80).await {
+            match classify_claude_pane(&pane) {
+                PaneState::Ready => return true,
+                PaneState::TrustDialog if dismissals < MAX_DIALOG_DISMISSALS => {
+                    dismissals += 1;
+                    tracing::warn!(
+                        %target,
+                        attempt = dismissals,
+                        "trust dialog rendered despite pre-trust; dismissing deliberately"
+                    );
+                    let _ = tmux::send_keys(SCOPE, session, window, &["1"]).await;
+                    sleep(Duration::from_millis(200)).await;
+                    let _ = tmux::press_enter(SCOPE, session, window).await;
+                    sleep(Duration::from_millis(800)).await;
+                    continue;
+                }
+                PaneState::TrustDialog | PaneState::Booting => {}
             }
         }
         sleep(Duration::from_millis(500)).await;
     }
     false
 }
+
+/// Pre-trust the working dir in the account's `.claude.json` so the
+/// directory-trust dialog never renders for this spawn. Claude Code keys
+/// the dialog off `projects["<dir>"].hasTrustDialogAccepted` in
+/// `$CLAUDE_CONFIG_DIR/.claude.json` (schema verified against a live
+/// operator config, 2026-06-11). Race-free, unlike dialog dismissal — the
+/// entry is on disk before the CLI boots. Dismissal stays as the in-loop
+/// fallback for the cases this can't handle.
+///
+/// Preserves every existing key (the file accretes per-project state the
+/// CLI owns) and refuses to touch a file it can't parse rather than
+/// clobber it — the CLI hard-fails on a corrupt `.claude.json`.
+fn pre_trust_project_dir(claude_config_dir: &Path, working_dir: &Path) -> Result<()> {
+    let cfg_err = |reason: String| Error::Provider {
+        kind: ProviderKind::ClaudeCode,
+        reason,
+    };
+    let wd = path_to_arg(working_dir)?;
+    let cfg_path = claude_config_dir.join(".claude.json");
+    let mut root: serde_json::Value = if cfg_path.exists() {
+        let raw = std::fs::read_to_string(&cfg_path)
+            .map_err(|e| cfg_err(format!("read {}: {e}", cfg_path.display())))?;
+        serde_json::from_str(&raw).map_err(|e| {
+            cfg_err(format!(
+                "parse {}: {e} (refusing to clobber)",
+                cfg_path.display()
+            ))
+        })?
+    } else {
+        serde_json::json!({})
+    };
+    let obj = root
+        .as_object_mut()
+        .ok_or_else(|| cfg_err(format!("{} top level is not an object", cfg_path.display())))?;
+    let projects = obj
+        .entry("projects")
+        .or_insert_with(|| serde_json::json!({}));
+    let projects = projects.as_object_mut().ok_or_else(|| {
+        cfg_err(format!(
+            "{} `projects` is not an object",
+            cfg_path.display()
+        ))
+    })?;
+    let entry = projects.entry(wd).or_insert_with(|| serde_json::json!({}));
+    let entry = entry
+        .as_object_mut()
+        .ok_or_else(|| cfg_err("project entry is not an object".to_string()))?;
+    entry.insert(
+        "hasTrustDialogAccepted".to_string(),
+        serde_json::Value::Bool(true),
+    );
+    // Write-then-rename so a crash never leaves a truncated .claude.json.
+    let tmp = claude_config_dir.join(".claude.json.subctl-tmp");
+    let serialized = serde_json::to_string_pretty(&root)
+        .map_err(|e| cfg_err(format!("serialize .claude.json: {e}")))?;
+    std::fs::write(&tmp, serialized)
+        .map_err(|e| cfg_err(format!("write {}: {e}", tmp.display())))?;
+    std::fs::rename(&tmp, &cfg_path)
+        .map_err(|e| cfg_err(format!("rename into {}: {e}", cfg_path.display())))?;
+    Ok(())
+}
+
+/// Drop the per-session HMAC key into the worker's config dir
+/// (`.subctl-directive-key`, 0600) so the worker-side
+/// `subctl directive verify` verb can authenticate envelopes without the
+/// secret riding in the spawn prompt. Same bytes + hygiene as v3's
+/// `~/.local/state/subctl/teams/<id>/hmac.secret`. The hex value goes to
+/// disk only — never log it ([`HmacKey`]'s `Debug` redacts).
+pub(crate) fn provision_directive_key(dir: &Path, key: &HmacKey) -> Result<()> {
+    use std::io::Write;
+    let key_err = |reason: String| Error::Provider {
+        kind: ProviderKind::ClaudeCode,
+        reason,
+    };
+    let path = dir.join(".subctl-directive-key");
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts
+        .open(&path)
+        .map_err(|e| key_err(format!("open {}: {e}", path.display())))?;
+    writeln!(f, "{}", key.to_hex())
+        .map_err(|e| key_err(format!("write {}: {e}", path.display())))?;
+    // `mode(0o600)` only applies at create time; tighten a pre-existing
+    // wider-permissioned file too.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+/// Build the worker launch command: an inline `CLAUDE_CONFIG_DIR=…`
+/// assignment followed by the `claude` binary invoked by ABSOLUTE path
+/// (never `command claude`), so the spawned worker resolves the same
+/// native binary regardless of the tmux/launchd PATH.
 
 fn build_launch_line(claude_config_dir: &Path, claude_bin: &Path) -> Result<String> {
     let config_dir = path_to_arg(claude_config_dir)?;
@@ -558,5 +801,152 @@ evy-providers crate with Claude/Codex/DeepSeek adapters
         let id = WorkerId(Uuid::parse_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap());
         assert_eq!(window_name_for(id), "worker-aaaaaaaa");
         assert_eq!(buffer_name_for(id), "subctl-claude-aaaaaaaa");
+    }
+
+    // ── W6.5 ① — composer-specific ready matcher ─────────────────────────
+
+    /// Regression fixture for the 2026-06-11 live mandate loss: the trust
+    /// dialog plus the shell launch line render TWO `❯` chars, which the
+    /// old `matches('❯').count() >= 2` heuristic declared ready. The
+    /// classifier must call this a dialog, never ready.
+    const TRUST_DIALOG_PANE: &str = "\
+❯ CLAUDE_CONFIG_DIR=/Users/op/.claude-argent /Users/op/.local/bin/claude
+
+ Do you trust the files in this folder?
+
+ /tmp/w6-argent-proof
+
+ ❯ 1. Yes, proceed
+   2. No, exit
+";
+
+    #[test]
+    fn trust_dialog_with_two_chevrons_is_not_ready() {
+        assert_eq!(
+            classify_claude_pane(TRUST_DIALOG_PANE),
+            PaneState::TrustDialog
+        );
+        assert!(
+            TRUST_DIALOG_PANE.matches('❯').count() >= 2,
+            "fixture must reproduce the old heuristic's false positive"
+        );
+    }
+
+    #[test]
+    fn ready_composer_classifies_ready() {
+        let pane = "╭───╮\n│ ❯ Try \"fix a bug\"  │\n╰───╯\n  ? for shortcuts";
+        assert_eq!(classify_claude_pane(pane), PaneState::Ready);
+        let chevron_only = "status line ⏵⏵ accept edits on";
+        assert_eq!(classify_claude_pane(chevron_only), PaneState::Ready);
+    }
+
+    #[test]
+    fn dialog_marker_wins_over_ready_marker() {
+        // Even if a composer marker has scrolled into view, a dialog on
+        // screen means pasting loses the directive — dialog must win.
+        let pane = format!("? for shortcuts\n{TRUST_DIALOG_PANE}");
+        assert_eq!(classify_claude_pane(&pane), PaneState::TrustDialog);
+    }
+
+    #[test]
+    fn booting_banner_is_not_ready() {
+        let pane = "❯ CLAUDE_CONFIG_DIR=/x /y/claude\n  Loading…\n  Claude Code v2";
+        assert_eq!(classify_claude_pane(pane), PaneState::Booting);
+    }
+
+    #[test]
+    fn directive_visible_matches_head_or_paste_placeholder() {
+        assert!(directive_visible(
+            "│ [subctl-master directive · phase=dispatch · ts:2026-06-11T00:00:00.000Z · hmac:abcdef0123456789] │"
+        ));
+        assert!(directive_visible("│ [Pasted text #1 +120 lines] │"));
+        assert!(!directive_visible("❯ Try \"fix a bug\""));
+    }
+
+    // ── W6.5 ① — config pre-trust + key provisioning ─────────────────────
+
+    #[test]
+    fn pre_trust_creates_claude_json_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        pre_trust_project_dir(dir.path(), Path::new("/tmp/wt")).unwrap();
+        let raw = std::fs::read_to_string(dir.path().join(".claude.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["projects"]["/tmp/wt"]["hasTrustDialogAccepted"], true);
+    }
+
+    #[test]
+    fn pre_trust_preserves_existing_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".claude.json"),
+            r#"{"oauthAccount":{"email":"op@example.com"},"projects":{"/other":{"hasTrustDialogAccepted":false,"allowedTools":["Bash"]}}}"#,
+        )
+        .unwrap();
+        pre_trust_project_dir(dir.path(), Path::new("/tmp/wt")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join(".claude.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["oauthAccount"]["email"], "op@example.com");
+        assert_eq!(v["projects"]["/other"]["hasTrustDialogAccepted"], false);
+        assert_eq!(v["projects"]["/other"]["allowedTools"][0], "Bash");
+        assert_eq!(v["projects"]["/tmp/wt"]["hasTrustDialogAccepted"], true);
+    }
+
+    #[test]
+    fn pre_trust_upserts_existing_project_entry_without_dropping_state() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".claude.json"),
+            r#"{"projects":{"/tmp/wt":{"hasTrustDialogAccepted":false,"ignorePatterns":["dist"]}}}"#,
+        )
+        .unwrap();
+        pre_trust_project_dir(dir.path(), Path::new("/tmp/wt")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join(".claude.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["projects"]["/tmp/wt"]["hasTrustDialogAccepted"], true);
+        assert_eq!(v["projects"]["/tmp/wt"]["ignorePatterns"][0], "dist");
+    }
+
+    #[test]
+    fn pre_trust_refuses_to_clobber_unparsable_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".claude.json");
+        std::fs::write(&path, "{ not json").unwrap();
+        let err = pre_trust_project_dir(dir.path(), Path::new("/tmp/wt")).unwrap_err();
+        assert!(
+            err.to_string().contains("refusing to clobber"),
+            "got: {err}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
+    }
+
+    #[test]
+    fn provision_directive_key_writes_hex_with_0600() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = HmacKey::generate();
+        provision_directive_key(dir.path(), &key).unwrap();
+        let path = dir.path().join(".subctl-directive-key");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(raw.trim(), key.to_hex());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "key file must be 0600");
+        }
+    }
+
+    #[test]
+    fn provision_directive_key_overwrite_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let k1 = HmacKey::generate();
+        let k2 = HmacKey::generate();
+        provision_directive_key(dir.path(), &k1).unwrap();
+        provision_directive_key(dir.path(), &k2).unwrap();
+        let raw = std::fs::read_to_string(dir.path().join(".subctl-directive-key")).unwrap();
+        assert_eq!(raw.trim(), k2.to_hex(), "later key must replace earlier");
     }
 }
