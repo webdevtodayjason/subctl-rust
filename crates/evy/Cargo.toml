@@ -57,6 +57,10 @@ async-trait = { workspace = true }
 # Cron-aware timestamps for log lines + future "next fire" diagnostics.
 chrono = { version = "0.4", features = ["serde"] }
 
+# EA1 — the `evy_kill_worker` agency tool parses operator-supplied
+# worker ids back into `WorkerId(Uuid)`. Promoted from dev-dependencies.
+uuid = { workspace = true }
+
 [dev-dependencies]
 # ── Phase 2 Slice 2D — cutover testing ───────────────────────────────────
 # These dev-deps power the `tests/cutover/` harness. Each version pin
@@ -74,4 +78,3 @@ serde_json = { workspace = true }
 futures-util = "0.3"
 eventsource-stream = "0.2"
 async-trait = { workspace = true }
-uuid = { workspace = true }

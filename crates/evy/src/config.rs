@@ -516,6 +516,14 @@ pub struct LmStudioSectionConfig {
     /// Optional sampling temperature override. Default `0.7`.
     #[serde(default)]
     pub temperature: Option<f32>,
+    /// EA1 — opt-in for advertising Evy's agency tools on the LM Studio
+    /// wire. Default `false`: gemma-class local models don't reliably
+    /// honour the OpenAI tool-call contract (the documented v0.5.0
+    /// scope cut), so tools stay off until the operator measures their
+    /// model and flips this. The no-tools self-knowledge path (live
+    /// status injection) works regardless of this flag.
+    #[serde(default)]
+    pub tools_enabled: bool,
 }
 
 fn default_accounts_conf_path() -> PathBuf {
@@ -934,6 +942,38 @@ temperature = 0.3
         let lm = tp.lm_studio.expect("lm_studio block present");
         assert_eq!(lm.endpoint.as_deref(), Some("http://127.0.0.1:9999"));
         assert_eq!(lm.temperature, Some(0.3));
+        assert!(
+            !lm.tools_enabled,
+            "tools_enabled must default to false (the v0.5.0 scope cut)"
+        );
+    }
+
+    #[test]
+    fn thinking_partner_lm_studio_tools_enabled_parses() {
+        let f = write_toml(
+            r#"
+[scheduler]
+db_path = "/tmp/evy.db"
+
+[policy]
+path = "/tmp/policy.toml"
+
+[providers]
+
+[thinking_partner]
+backend = "lm-studio"
+
+[thinking_partner.lm_studio]
+tools_enabled = true
+"#,
+        );
+        let cfg = Config::load_from(f.path()).expect("parse");
+        let lm = cfg
+            .thinking_partner
+            .expect("present")
+            .lm_studio
+            .expect("block present");
+        assert!(lm.tools_enabled);
     }
 
     #[test]

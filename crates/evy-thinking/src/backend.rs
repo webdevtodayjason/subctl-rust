@@ -53,6 +53,18 @@ pub enum StreamChunk {
 ///   tokio tasks (`Arc<dyn LlmBackend>` is the typical handle).
 #[async_trait]
 pub trait LlmBackend: Send + Sync {
+    /// Per-backend capability truth, appended to the system prompt by
+    /// [`crate::ThinkingPartner`] each turn.
+    ///
+    /// `Some(brief)` — this backend will advertise tools on the wire
+    /// this turn (return [`crate::templates::tool_capability_brief`]).
+    /// `None` (the default) — no tools reach the wire; the partner
+    /// appends [`crate::templates::no_tools_brief`] instead, so the
+    /// model never claims abilities its backend doesn't carry.
+    fn capability_brief(&self) -> Option<String> {
+        None
+    }
+
     /// Produce the next partner turn given the planning context.
     ///
     /// # Errors

@@ -76,6 +76,7 @@ use tracing::{debug, info, warn};
 use crate::backend::LlmBackend;
 use crate::error::{Result, ThinkingError};
 use crate::session::{Message, Role};
+use crate::tools::ToolRegistry;
 
 /// Default base URL for the Anthropic API. Overridden in tests to point
 /// at a `wiremock` server.
@@ -101,15 +102,16 @@ pub const DEFAULT_MAX_TOKENS: u32 = 4096;
 /// than just waiting.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Upper bound on consecutive `skill_view` tool round-trips per
-/// [`AnthropicBackend::respond`] call.
+/// Upper bound on consecutive tool round-trips per
+/// [`AnthropicBackend::respond`] call — re-exported from
+/// [`crate::tools`] so existing callers keep compiling.
 ///
-/// A well-behaved model loads 1-3 skills then produces a text response.
+/// A well-behaved model calls 1-3 tools then produces a text response.
 /// Anything past this cap is almost certainly a pathological loop (the
-/// model keeps re-loading skills instead of answering). We surface as
+/// model keeps re-calling tools instead of answering). We surface as
 /// [`ThinkingError::BackendRefused`] so the caller knows the wire was
 /// fine but the conversation didn't converge.
-pub const MAX_TOOL_ROUNDTRIPS: usize = 5;
+pub use crate::tools::MAX_TOOL_ROUNDTRIPS;
 
 /// Tool name advertised to the LLM for Hermes-style skill autoload.
 const SKILL_VIEW_TOOL: &str = "skill_view";
@@ -181,6 +183,11 @@ pub struct AnthropicBackend {
     /// `None`, the backend behaves exactly as it did before
     /// Phase 5 (no skill autoload, no tools field on the wire).
     skills: Option<Arc<SkillRegistry>>,
+    /// Optional agency tool registry (EA1). When `Some` and non-empty,
+    /// every `respond()` advertises the registry's tools alongside
+    /// `skill_view` and dispatches their `tool_use` blocks through
+    /// [`ToolRegistry::execute`] inside the same round-trip loop.
+    tools: Option<Arc<ToolRegistry>>,
 }
 
 impl AnthropicBackend {
@@ -197,6 +204,7 @@ impl AnthropicBackend {
             config,
             http,
             skills: None,
+            tools: None,
         }
     }
 
@@ -208,6 +216,22 @@ impl AnthropicBackend {
     pub fn with_skills(mut self, skills: Arc<SkillRegistry>) -> Self {
         self.skills = Some(skills);
         self
+    }
+
+    /// Attach an agency [`ToolRegistry`] (EA1). The registry's tools
+    /// are advertised on every `respond()` and dispatched inside the
+    /// same tool loop that serves `skill_view`.
+    #[must_use]
+    pub fn with_tools(mut self, tools: Arc<ToolRegistry>) -> Self {
+        self.tools = Some(tools);
+        self
+    }
+
+    /// The active agency registry, if attached AND non-empty. An empty
+    /// registry is treated as absent — same guard as the skills path
+    /// (never advertise tools the model can't successfully call).
+    fn active_tools(&self) -> Option<&Arc<ToolRegistry>> {
+        self.tools.as_ref().filter(|r| r.count() > 0)
     }
 
     /// The configured model — exposed for diagnostics + tests.
@@ -246,31 +270,46 @@ impl AnthropicBackend {
         }
     }
 
-    /// Build the `tools` array for the request body when skills are
-    /// configured AND the registry has at least one entry. Returns
-    /// `None` otherwise — Anthropic accepts the field being absent
-    /// entirely, and advertising `skill_view` against an empty registry
-    /// would give the model a tool whose every invocation errors out.
+    /// Build the `tools` array for the request body: `skill_view` when
+    /// a non-empty skills registry is attached, plus every agency-tool
+    /// spec when a non-empty [`ToolRegistry`] is attached. Returns
+    /// `None` when neither contributes — Anthropic accepts the field
+    /// being absent entirely, and advertising tools against empty
+    /// registries would give the model tools whose every invocation
+    /// errors out.
     fn tools_for_request(&self) -> Option<Vec<Value>> {
-        let reg = self.skills.as_ref()?;
-        if reg.count() == 0 {
-            return None;
+        let mut out: Vec<Value> = Vec::new();
+        if self.skills.as_ref().is_some_and(|r| r.count() > 0) {
+            out.push(json!({
+                "name": SKILL_VIEW_TOOL,
+                "description": "Load the full body of a named skill from the operator's skill catalog. Call this whenever the system-prompt skills index lists a skill that is even partially relevant to the current turn; the returned content is procedural knowledge you do not have by default.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "The exact skill name as listed in the system-prompt index."
+                        }
+                    },
+                    "required": ["name"],
+                    "additionalProperties": false
+                }
+            }));
         }
-        Some(vec![json!({
-            "name": SKILL_VIEW_TOOL,
-            "description": "Load the full body of a named skill from the operator's skill catalog. Call this whenever the system-prompt skills index lists a skill that is even partially relevant to the current turn; the returned content is procedural knowledge you do not have by default.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "The exact skill name as listed in the system-prompt index."
-                    }
-                },
-                "required": ["name"],
-                "additionalProperties": false
-            }
-        })])
+        if let Some(reg) = self.active_tools() {
+            out.extend(reg.specs().into_iter().map(|s| {
+                json!({
+                    "name": s.name,
+                    "description": s.description,
+                    "input_schema": s.input_schema,
+                })
+            }));
+        }
+        if out.is_empty() {
+            None
+        } else {
+            Some(out)
+        }
     }
 
     /// Send one HTTP request to Anthropic with the supplied wire body
@@ -391,7 +430,7 @@ impl LlmBackend for AnthropicBackend {
             // conversation is not converging.
             if round == MAX_TOOL_ROUNDTRIPS {
                 return Err(ThinkingError::BackendRefused(format!(
-                    "skill_view loop exceeded max iterations ({MAX_TOOL_ROUNDTRIPS}); model never produced text"
+                    "tool loop exceeded max iterations ({MAX_TOOL_ROUNDTRIPS}); model never produced text"
                 )));
             }
 
@@ -426,7 +465,7 @@ impl LlmBackend for AnthropicBackend {
 
             let mut tool_results: Vec<Value> = Vec::with_capacity(tool_uses.len());
             for tool in tool_uses {
-                let result = self.handle_tool_call(tool);
+                let result = self.handle_tool_call(tool).await;
                 tool_results.push(result);
             }
             wire_messages.push(json!({
@@ -440,33 +479,57 @@ impl LlmBackend for AnthropicBackend {
         // Keeping an explicit error path here protects against a future
         // edit that breaks the invariant.
         Err(ThinkingError::BackendRefused(
-            "skill_view loop exited without producing text".to_string(),
+            "tool loop exited without producing text".to_string(),
         ))
+    }
+
+    fn capability_brief(&self) -> Option<String> {
+        let reg = self.active_tools()?;
+        Some(crate::templates::tool_capability_brief(&reg.names()))
     }
 }
 
 impl AnthropicBackend {
-    /// Resolve one `skill_view` tool_use block into a `tool_result`
-    /// value ready to drop into the next user turn's content array.
+    /// Resolve one tool_use block into a `tool_result` value ready to
+    /// drop into the next user turn's content array. `skill_view` goes
+    /// to the skills registry; everything else is dispatched through
+    /// the agency [`ToolRegistry`] (which owns the audit line).
     ///
-    /// On unknown skill name, surfaces `is_error: true` with a short
-    /// message so the model can recover (try a different skill or just
-    /// produce text without one).
-    fn handle_tool_call(&self, tool: &WireToolUseBlock) -> Value {
+    /// On unknown tool/skill name, surfaces `is_error: true` with a
+    /// short message so the model can recover (try a different tool or
+    /// just produce text without one).
+    async fn handle_tool_call(&self, tool: &WireToolUseBlock) -> Value {
         if tool.name != SKILL_VIEW_TOOL {
-            // We only advertise one tool. Anything else is a
-            // contract violation; surface as an error result so the
-            // model abandons the line and doesn't loop on us.
-            warn!(
-                tool = %tool.name,
-                "anthropic asked for unknown tool",
-            );
-            return json!({
-                "type": "tool_result",
-                "tool_use_id": tool.id,
-                "is_error": true,
-                "content": format!("unknown tool `{}`; only `skill_view` is supported", tool.name),
-            });
+            // Agency tool — the registry audits and dispatches; an
+            // unknown name comes back as Err so the model abandons the
+            // line and doesn't loop on us.
+            let result = match self.active_tools() {
+                Some(reg) => reg.execute(&tool.name, &tool.input).await,
+                None => Err(format!(
+                    "unknown tool `{}`; only `skill_view` is supported",
+                    tool.name
+                )),
+            };
+            return match result {
+                Ok(content) => json!({
+                    "type": "tool_result",
+                    "tool_use_id": tool.id,
+                    "content": content,
+                }),
+                Err(msg) => {
+                    warn!(
+                        tool = %tool.name,
+                        error = %msg,
+                        "anthropic tool call failed",
+                    );
+                    json!({
+                        "type": "tool_result",
+                        "tool_use_id": tool.id,
+                        "is_error": true,
+                        "content": msg,
+                    })
+                }
+            };
         }
 
         let requested = tool.input.get("name").and_then(Value::as_str).unwrap_or("");

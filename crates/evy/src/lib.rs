@@ -68,6 +68,7 @@
 
 #![warn(missing_docs)]
 
+pub mod agency;
 pub mod config;
 pub mod dispatch;
 pub mod jobs_file;
@@ -92,8 +93,8 @@ use evy_providers::{ClaudeCodeProvider, CodexProvider, DeepSeekProvider, HmacKey
 use evy_scheduler::{Job, JobAction, JobId, RunOutcome, Scheduler};
 use evy_skills::SkillRegistry;
 use evy_thinking::{
-    AnthropicBackend, AnthropicConfig, CodexOauthBackend, CodexOauthConfig, LlmBackend,
-    LmStudioBackend, LmStudioConfig, ThinkingPartner,
+    AnthropicBackend, AnthropicConfig, CodexOauthBackend, CodexOauthConfig, LiveStatusSource,
+    LlmBackend, LmStudioBackend, LmStudioConfig, ThinkingPartner, ToolRegistry,
 };
 use tokio::signal;
 use tokio::sync::oneshot;
@@ -508,12 +509,47 @@ pub async fn run_daemon_with_shutdown(
         None
     };
 
+    // Optional Telegram bridge — constructed BEFORE the thinking-partner
+    // (EA1: the `evy_notify_operator` tool holds a handle) and before
+    // the app state (the notify/ask HTTP surface, criterion #6). The
+    // clone moved into `run(token)` below is the long-lived poll loop.
+    let telegram_bridge = config.comms.telegram.clone().map(|tg| {
+        let mut tcfg: evy_comms::TelegramConfig = tg.into();
+        // Wave 4 (orch events) — share the SSE broadcaster so inbound
+        // operator messages surface on /api/evy/events as the cockpit's
+        // named `inbound` frame (orch.js live feed).
+        tcfg.events = Some(event_broadcaster.clone());
+        let bridge = TelegramBridge::new(tcfg, ask_registry.clone());
+        tracing::info!("telegram bridge configured");
+        bridge
+    });
+
+    // EA1 — Evy's agency surface: the tool registry the tool-capable
+    // backends advertise, and the live-status source injected into
+    // every backend's system prompt. Built over the SAME handles the
+    // dashboard surface reads/writes (worker registry, broadcaster,
+    // policy, watchdog diag) so chat answers and dashboard rows can
+    // never disagree.
+    let agency_deps = agency::AgencyDeps {
+        workers: worker_registry.clone(),
+        broadcaster: event_broadcaster.clone(),
+        policy: policy.clone(),
+        tmux: Arc::new(evy_watchdog::RealTmuxQuery),
+        watchdog_diag: Some(watchdog_registry.clone()),
+        telegram: telegram_bridge.clone(),
+        accounts_conf: crate::state::accounts_conf_path(),
+        snapshots: agency::usage_snapshots_path(),
+    };
+    let agency_tools = Arc::new(agency::build_tool_registry(&agency_deps));
+    let live_status: Arc<dyn LiveStatusSource> = Arc::new(agency::build_live_status(&agency_deps));
+
     // Phase 6 — optional thinking-partner. Constructed only when the
     // operator authored `[thinking_partner]` in their TOML. The
     // anthropic backend is the only production wiring today; "stub"
     // is intended for smoke tests that need a partner without
     // touching the live API.
-    let thinking_partner = build_thinking_partner(&config, skills_registry.clone()).await?;
+    let thinking_partner =
+        build_thinking_partner(&config, skills_registry.clone(), agency_tools, live_status).await?;
     if let Some(partner) = thinking_partner.as_ref() {
         // P3 — rehydrate persisted sessions before serving so a restart
         // doesn't silently lose the operator's open conversation.
@@ -525,20 +561,6 @@ pub async fn run_daemon_with_shutdown(
     } else {
         tracing::info!("no [thinking_partner] in config; chat endpoint will return 503");
     }
-
-    // Optional Telegram bridge — constructed BEFORE the app state so the
-    // notify/ask HTTP surface (criterion #6) holds a handle. The clone
-    // moved into `run(token)` below is the long-lived poll loop.
-    let telegram_bridge = config.comms.telegram.clone().map(|tg| {
-        let mut tcfg: evy_comms::TelegramConfig = tg.into();
-        // Wave 4 (orch events) — share the SSE broadcaster so inbound
-        // operator messages surface on /api/evy/events as the cockpit's
-        // named `inbound` frame (orch.js live feed).
-        tcfg.events = Some(event_broadcaster.clone());
-        let bridge = TelegramBridge::new(tcfg, ask_registry.clone());
-        tracing::info!("telegram bridge configured");
-        bridge
-    });
 
     // Optional Discord bridge. Same shape as telegram — `run(token)`
     // long-lived, `notify`/`ask` on the original handle.
@@ -745,9 +767,16 @@ async fn wait_for_shutdown_signal() -> ShutdownSignal {
 ///
 /// The "stub" backend is a fixed-reply implementation useful for
 /// integration tests that need a partner without touching Anthropic.
+///
+/// EA1 — `tools` is attached to tool-capable backends (anthropic
+/// always; lm-studio only behind its `tools_enabled` opt-in flag), and
+/// `status` is attached to the partner itself so EVERY backend's
+/// system prompt carries the live fleet block.
 async fn build_thinking_partner(
     config: &Config,
     skills: Option<Arc<SkillRegistry>>,
+    tools: Arc<ToolRegistry>,
+    status: Arc<dyn LiveStatusSource>,
 ) -> Result<Option<Arc<ThinkingPartner>>> {
     let Some(cfg) = config.thinking_partner.as_ref() else {
         return Ok(None);
@@ -774,6 +803,9 @@ async fn build_thinking_partner(
             if let Some(reg) = skills {
                 backend = backend.with_skills(reg);
             }
+            // EA1 — Anthropic models honour the tool contract; the
+            // agency registry is always attached here.
+            backend = backend.with_tools(tools.clone());
             Arc::new(backend)
         }
         "lm-studio" => {
@@ -790,6 +822,12 @@ async fn build_thinking_partner(
                 if let Some(temp) = section.temperature {
                     lm_cfg.temperature = temp;
                 }
+                // EA1 — operator opt-in for tools[] on the LM Studio
+                // wire. Defaults false (gemma-class models don't
+                // reliably honour the tool-call contract); the backend
+                // additionally requires a non-empty registry before
+                // anything reaches the wire.
+                lm_cfg.tools_enabled = section.tools_enabled;
             }
             if let Some(model) = &cfg.model {
                 lm_cfg.model = Some(model.clone());
@@ -802,7 +840,7 @@ async fn build_thinking_partner(
             // here; future work can add it once local-model tool-use
             // is reliable.
             let _ = skills;
-            Arc::new(LmStudioBackend::new(lm_cfg))
+            Arc::new(LmStudioBackend::new(lm_cfg).with_tools(tools.clone()))
         }
         "codex" => {
             // Codex OAuth — reuses tokens minted by `subctl auth codex`
@@ -850,7 +888,11 @@ async fn build_thinking_partner(
         .parent()
         .map(|d| d.join("evy-sessions.json"))
         .unwrap_or_else(|| std::path::PathBuf::from("evy-sessions.json"));
-    let partner = ThinkingPartner::new(backend).with_store_path(store_path);
+    // EA1 — the live-status source rides the partner (not a backend) so
+    // every backend's system prompt carries the fleet block.
+    let partner = ThinkingPartner::new(backend)
+        .with_store_path(store_path)
+        .with_status_source(status);
     Ok(Some(Arc::new(partner)))
 }
 

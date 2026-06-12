@@ -88,8 +88,8 @@ General rules:\n\
 - Surface unknowns explicitly; don't paper over them with optimism.\n\
 - If the operator says something that contradicts an earlier assumption, \
 say so and revise — don't quietly continue.\n\
-- You do not have web access, file access, or the ability to spawn workers. \
-You are reasoning out loud."
+- You are reasoning out loud; your capabilities on this surface are stated \
+below."
     )
 }
 
@@ -129,13 +129,56 @@ structured artifact — a greeting just gets Evy. If the operator asks you to th
 through, design, or plan something concrete, you may run a structured planning session \
 (Goal / Unknowns / Approach / Risks); otherwise simply talk with them as Evy.\n\
 \n\
-You are reasoning and conversing from this surface only — you do not have direct file, \
-web, or worker-spawn access here.\n\
+Your capabilities on this surface are stated below — believe that statement, not \
+assumptions.\n\
 \n\
 --- BEGIN EVY PERSONA (canonical, operator-authored) ---\n\
 {EVY_VOICE}\n\
 --- END EVY PERSONA ---"
     )
+}
+
+/// Capability brief appended (by [`crate::ThinkingPartner`]) for
+/// backends whose [`crate::LlmBackend::capability_brief`] advertises an
+/// active tool registry. States which tools exist and the contract for
+/// using them — most importantly that results must come from real
+/// calls, never be invented.
+#[must_use]
+pub fn tool_capability_brief(tool_names: &[String]) -> String {
+    format!(
+        "CAPABILITIES — you have live tools on this surface: {names}. \
+Call a tool whenever the operator asks about accounts, usage, sessions, \
+workers, or watchdogs — the tool result is the live truth; your training \
+data and the conversation are not. NEVER invent or guess a tool result: \
+if a tool errors, say so plainly. Action tools (spawn / kill / notify) \
+are policy-gated and audit-logged; use them only when the operator \
+clearly asked for the action, and report exactly what the tool returned.",
+        names = tool_names.join(", ")
+    )
+}
+
+/// Capability brief appended (by [`crate::ThinkingPartner`]) for
+/// backends WITHOUT an active tool registry. Replaces the old blanket
+/// "no file/web/worker access" line — still true here, but now paired
+/// with guidance to answer fleet questions from the injected live
+/// status block when one is present.
+#[must_use]
+pub fn no_tools_brief() -> String {
+    "CAPABILITIES — you do not have direct file, web, or worker-spawn \
+access on this surface. If a LIVE FLEET STATUS block appears below, it \
+is real telemetry gathered moments ago: answer questions about \
+accounts, usage, sessions, workers, and watchdogs from it. If the \
+block is absent and the operator asks about live state, say you cannot \
+see it right now — do not guess."
+        .to_string()
+}
+
+/// Header line wrapped around the injected live-status block so the
+/// model (and anyone reading a transcript) can tell telemetry from
+/// conversation. The partner appends `status_header() + block`.
+#[must_use]
+pub fn status_header() -> String {
+    "── LIVE FLEET STATUS (auto-gathered; trust over memory) ──".to_string()
 }
 
 /// The synthetic user turn the partner pushes at session open. The

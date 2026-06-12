@@ -70,6 +70,7 @@ pub mod lm_studio;
 pub mod partner;
 pub mod session;
 pub mod templates;
+pub mod tools;
 
 // ── Public re-exports — the surface daemon-side code consumes ──────────
 
@@ -92,5 +93,7 @@ pub use lm_studio::{
 pub use partner::{MessageHook, ThinkingPartner};
 pub use session::{Message, Role, Session, SessionId, SessionMode, SessionStatus};
 pub use templates::{
-    conclusion_user_turn, conversational_system_prompt, kickoff_user_turn, planning_system_prompt,
+    conclusion_user_turn, conversational_system_prompt, kickoff_user_turn, no_tools_brief,
+    planning_system_prompt, status_header, tool_capability_brief,
 };
+pub use tools::{EvyTool, LiveStatusSource, ToolRegistry, ToolSpec, MAX_TOOL_ROUNDTRIPS};

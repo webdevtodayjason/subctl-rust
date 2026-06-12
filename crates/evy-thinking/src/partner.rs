@@ -18,8 +18,16 @@ use crate::backend::{LlmBackend, StreamChunk};
 use crate::error::{Result, ThinkingError};
 use crate::session::{Message, Role, Session, SessionId, SessionMode, SessionStatus};
 use crate::templates::{
-    conclusion_user_turn, conversational_system_prompt, kickoff_user_turn, planning_system_prompt,
+    conclusion_user_turn, conversational_system_prompt, kickoff_user_turn, no_tools_brief,
+    planning_system_prompt, status_header,
 };
+use crate::tools::LiveStatusSource;
+
+/// Defensive upper bound (chars) on the injected live-status block.
+/// The daemon-side [`LiveStatusSource`] is expected to summarize well
+/// under this; the cap exists so a misbehaving source can't blow the
+/// per-turn token budget.
+const MAX_STATUS_BLOCK_CHARS: usize = 4096;
 
 /// Type alias for the per-message hook the daemon wires in.
 ///
@@ -55,6 +63,10 @@ pub struct ThinkingPartner {
     /// [`save_all`](Self::save_all) after each turn so conversations
     /// survive a restart. `None` keeps the partner purely in-memory.
     store_path: Option<std::path::PathBuf>,
+    /// EA1 — optional live-status source. When set, every turn's system
+    /// prompt gains a compact fleet-status block so even tool-less
+    /// backends can answer "what's running" questions truthfully.
+    status: Option<Arc<dyn LiveStatusSource>>,
 }
 
 impl ThinkingPartner {
@@ -69,7 +81,50 @@ impl ThinkingPartner {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             on_message: None,
             store_path: None,
+            status: None,
         }
+    }
+
+    /// EA1 — attach a [`LiveStatusSource`]. Builder-style. When set,
+    /// [`Self::augment_prompt`] appends the source's status block to
+    /// every turn's system prompt (all backends, tool-capable or not).
+    #[must_use]
+    pub fn with_status_source(mut self, source: Arc<dyn LiveStatusSource>) -> Self {
+        self.status = Some(source);
+        self
+    }
+
+    /// Compose the final system prompt for a turn: the mode template,
+    /// the backend's capability truth (tool brief or no-tools brief —
+    /// whichever is actually the case this turn), and the live-status
+    /// block when a source is attached.
+    ///
+    /// Async because the status source may probe tmux / read snapshot
+    /// files (behind its own short-TTL cache). Callers run this AFTER
+    /// dropping the sessions lock.
+    async fn augment_prompt(&self, base: String) -> String {
+        let mut prompt = base;
+        let brief = self
+            .backend
+            .capability_brief()
+            .unwrap_or_else(no_tools_brief);
+        prompt.push_str("\n\n");
+        prompt.push_str(&brief);
+        if let Some(src) = &self.status {
+            if let Some(block) = src.status_block().await {
+                let block = if block.len() > MAX_STATUS_BLOCK_CHARS {
+                    let truncated: String = block.chars().take(MAX_STATUS_BLOCK_CHARS).collect();
+                    format!("{truncated}…[truncated]")
+                } else {
+                    block
+                };
+                prompt.push_str("\n\n");
+                prompt.push_str(&status_header());
+                prompt.push('\n');
+                prompt.push_str(&block);
+            }
+        }
+        prompt
     }
 
     /// Attach a per-message hook. The hook is invoked for every message
@@ -251,7 +306,7 @@ impl ThinkingPartner {
         self.emit(&kickoff);
         session.push(kickoff);
 
-        let system_prompt = planning_system_prompt(&topic);
+        let system_prompt = self.augment_prompt(planning_system_prompt(&topic)).await;
         let opening = self
             .backend
             .respond(&system_prompt, &session.messages)
@@ -298,7 +353,7 @@ impl ThinkingPartner {
         self.emit(&op_msg);
         session.push(op_msg);
 
-        let system_prompt = system_prompt_for(&session);
+        let system_prompt = self.augment_prompt(system_prompt_for(&session)).await;
         let reply = self
             .backend
             .respond(&system_prompt, &session.messages)
@@ -359,6 +414,7 @@ impl ThinkingPartner {
             let prompt = system_prompt_for(session);
             (prompt, session.messages.clone())
         };
+        let system_prompt = self.augment_prompt(system_prompt).await;
 
         debug!(session = %id.0, turns = history.len(), "evy-thinking: send");
 
@@ -411,7 +467,7 @@ impl ThinkingPartner {
         self.emit(&kickoff);
         session.push(kickoff);
 
-        let system_prompt = planning_system_prompt(&topic);
+        let system_prompt = self.augment_prompt(planning_system_prompt(&topic)).await;
         let opening = self
             .backend
             .stream_respond(&system_prompt, &session.messages, sink)
@@ -456,7 +512,7 @@ impl ThinkingPartner {
         self.emit(&op_msg);
         session.push(op_msg);
 
-        let system_prompt = system_prompt_for(&session);
+        let system_prompt = self.augment_prompt(system_prompt_for(&session)).await;
         let reply = self
             .backend
             .stream_respond(&system_prompt, &session.messages, sink)
@@ -512,6 +568,7 @@ impl ThinkingPartner {
             let prompt = system_prompt_for(session);
             (prompt, session.messages.clone())
         };
+        let system_prompt = self.augment_prompt(system_prompt).await;
 
         debug!(session = %id.0, turns = history.len(), "evy-thinking: stream_send");
 
@@ -562,6 +619,7 @@ impl ThinkingPartner {
             let prompt = planning_system_prompt(&session.topic);
             (prompt, session.messages.clone())
         };
+        let system_prompt = self.augment_prompt(system_prompt).await;
 
         let summary = self.backend.respond(&system_prompt, &history).await?;
 
@@ -905,6 +963,74 @@ mod tests {
         let bogus = SessionId::new();
         let ok = partner.drop_session(bogus).await.unwrap();
         assert!(!ok);
+    }
+
+    /// Fixed-block status source for compose tests.
+    struct FixedStatus(String);
+
+    #[async_trait]
+    impl LiveStatusSource for FixedStatus {
+        async fn status_block(&self) -> Option<String> {
+            Some(self.0.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn augmented_prompt_carries_capability_brief_and_status_block() {
+        let (backend, captures) = ScriptedBackend::new(vec!["hey"]);
+        let partner = ThinkingPartner::new(backend).with_status_source(Arc::new(FixedStatus(
+            "accounts (2): claude-a, claude-b\ntmux sessions (1): evy".to_string(),
+        )));
+        partner.start_conversation("hello".into()).await.unwrap();
+
+        let caps = captures.lock().unwrap();
+        let prompt = &caps[0].0;
+        // ScriptedBackend has no tools → the no-tools brief is the truth.
+        assert!(
+            prompt.contains("you do not have direct file, web, or worker-spawn"),
+            "no-tools brief missing; got: {prompt}"
+        );
+        assert!(
+            prompt.contains("LIVE FLEET STATUS"),
+            "status header missing; got: {prompt}"
+        );
+        assert!(
+            prompt.contains("accounts (2): claude-a, claude-b"),
+            "status block missing; got: {prompt}"
+        );
+    }
+
+    #[tokio::test]
+    async fn augmented_prompt_without_status_source_still_states_capabilities() {
+        let (backend, captures) = ScriptedBackend::new(vec!["hey"]);
+        let partner = ThinkingPartner::new(backend);
+        partner.start_conversation("hello".into()).await.unwrap();
+        let caps = captures.lock().unwrap();
+        let prompt = &caps[0].0;
+        assert!(prompt.contains("CAPABILITIES"), "got: {prompt}");
+        // The brief MENTIONS the block by name; the header line itself
+        // (with its "auto-gathered" marker) must be absent without a source.
+        assert!(
+            !prompt.contains("auto-gathered"),
+            "no source → no status header; got: {prompt}"
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_status_block_is_truncated_to_cap() {
+        let (backend, captures) = ScriptedBackend::new(vec!["hey"]);
+        let huge = "x".repeat(MAX_STATUS_BLOCK_CHARS * 3);
+        let partner = ThinkingPartner::new(backend).with_status_source(Arc::new(FixedStatus(huge)));
+        partner.start_conversation("hello".into()).await.unwrap();
+        let caps = captures.lock().unwrap();
+        let prompt = &caps[0].0;
+        assert!(prompt.contains("…[truncated]"), "truncation marker missing");
+        // The whole prompt stays bounded: template + briefs + capped block.
+        assert!(
+            prompt.len() < MAX_STATUS_BLOCK_CHARS + 8_000,
+            "prompt blew the budget: {} chars",
+            prompt.len()
+        );
     }
 
     #[tokio::test]

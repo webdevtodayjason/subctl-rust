@@ -87,6 +87,14 @@ pub trait TmuxQuery: Send + Sync {
     /// `<session>:<window>` or `<session>:<window>.<pane>`; the
     /// watchdog passes whatever the daemon gave it.
     async fn capture_pane(&self, target: &str, lines: usize) -> Result<String>;
+
+    /// `tmux list-windows -t <session> -F '#{window_name}'`. EA1 — used
+    /// by Evy's `evy_sessions` tool to enrich the session list. Default
+    /// impl returns empty so existing read-only implementors (and the
+    /// watchdogs, which never need windows) are untouched.
+    async fn list_windows(&self, _session: &str) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
 }
 
 /// Real tmux impl — shells out via `tokio::process::Command`.
@@ -143,6 +151,26 @@ impl TmuxQuery for RealTmuxQuery {
         }
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
+
+    async fn list_windows(&self, session: &str) -> Result<Vec<String>> {
+        let output = Command::new(tmux_bin())
+            .args(["list-windows", "-t", session, "-F", "#{window_name}"])
+            .output()
+            .await
+            .map_err(|e| watchdog_io_error("tmux_query", format!("spawn tmux: {e}")))?;
+        if !output.status.success() {
+            // Session vanished between list-sessions and here — normal
+            // race, same "nothing to see" semantics as list_sessions.
+            return Ok(Vec::new());
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect())
+    }
 }
 
 /// In-process tmux mock for tests. Sessions, pane captures, and the
@@ -158,6 +186,8 @@ struct MockState {
     sessions: Vec<String>,
     /// `<target>` → captured pane content.
     panes: HashMap<String, String>,
+    /// `<session>` → window names (EA1, `list_windows`).
+    windows: HashMap<String, Vec<String>>,
     /// When set, every query method returns this error instead of
     /// answering — scripted stand-in for "spawn tmux: No such file or
     /// directory" (the launchd bare-PATH condition, W6.5 row ②).
@@ -181,6 +211,17 @@ impl MockTmuxQuery {
     pub fn set_pane(&self, target: impl Into<String>, content: impl Into<String>) {
         let mut s = self.inner.lock().expect("mock-tmux-query poisoned");
         s.panes.insert(target.into(), content.into());
+    }
+
+    /// Set the window names visible to `list_windows(session)` (EA1).
+    pub fn set_windows(
+        &self,
+        session: impl Into<String>,
+        names: impl IntoIterator<Item = impl Into<String>>,
+    ) {
+        let mut s = self.inner.lock().expect("mock-tmux-query poisoned");
+        s.windows
+            .insert(session.into(), names.into_iter().map(Into::into).collect());
     }
 
     /// Remove a session AND any associated pane content. Mirrors the
@@ -232,6 +273,14 @@ impl TmuxQuery for MockTmuxQuery {
         }
         let s = self.inner.lock().expect("mock-tmux-query poisoned");
         Ok(s.panes.get(target).cloned().unwrap_or_default())
+    }
+
+    async fn list_windows(&self, session: &str) -> Result<Vec<String>> {
+        if let Some(e) = self.probe_error() {
+            return Err(e);
+        }
+        let s = self.inner.lock().expect("mock-tmux-query poisoned");
+        Ok(s.windows.get(session).cloned().unwrap_or_default())
     }
 }
 
