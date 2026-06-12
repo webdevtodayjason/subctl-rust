@@ -18,13 +18,46 @@
 //! test never shells out.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 use async_trait::async_trait;
 use evy_core::Result;
 use tokio::process::Command;
 
 use crate::error::watchdog_io_error;
+
+/// Resolve the tmux binary once per process.
+///
+/// The deployed daemon runs under launchd, whose default environment is
+/// the bare system `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`) — Homebrew's
+/// prefix is absent, so `Command::new("tmux")` fails with ENOENT even on
+/// a box where every interactive shell finds tmux (the W6.5 row ②
+/// production silence). Resolution order: first hit on `$PATH`, then the
+/// well-known Homebrew / local prefixes. Falls back to the bare name so
+/// the spawn error stays the honest "spawn tmux: No such file or
+/// directory" when tmux truly isn't installed.
+fn tmux_bin() -> &'static str {
+    static BIN: OnceLock<String> = OnceLock::new();
+    BIN.get_or_init(|| {
+        let mut candidates: Vec<PathBuf> = std::env::var_os("PATH")
+            .map(|path| {
+                std::env::split_paths(&path)
+                    .map(|dir| dir.join("tmux"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        candidates.extend(
+            ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux"]
+                .iter()
+                .map(PathBuf::from),
+        );
+        candidates
+            .into_iter()
+            .find(|candidate| candidate.is_file())
+            .map_or_else(|| "tmux".to_owned(), |p| p.to_string_lossy().into_owned())
+    })
+}
 
 /// Read-only tmux interrogation surface.
 ///
@@ -54,7 +87,7 @@ pub struct RealTmuxQuery;
 #[async_trait]
 impl TmuxQuery for RealTmuxQuery {
     async fn session_exists(&self, name: &str) -> Result<bool> {
-        let output = Command::new("tmux")
+        let output = Command::new(tmux_bin())
             .args(["has-session", "-t", name])
             .output()
             .await
@@ -63,7 +96,7 @@ impl TmuxQuery for RealTmuxQuery {
     }
 
     async fn list_sessions(&self) -> Result<Vec<String>> {
-        let output = Command::new("tmux")
+        let output = Command::new(tmux_bin())
             .args(["list-sessions", "-F", "#{session_name}"])
             .output()
             .await
@@ -85,7 +118,7 @@ impl TmuxQuery for RealTmuxQuery {
 
     async fn capture_pane(&self, target: &str, lines: usize) -> Result<String> {
         let history = format!("-{lines}");
-        let output = Command::new("tmux")
+        let output = Command::new(tmux_bin())
             .args(["capture-pane", "-p", "-t", target, "-S", history.as_str()])
             .output()
             .await
@@ -116,6 +149,10 @@ struct MockState {
     sessions: Vec<String>,
     /// `<target>` → captured pane content.
     panes: HashMap<String, String>,
+    /// When set, every query method returns this error instead of
+    /// answering — scripted stand-in for "spawn tmux: No such file or
+    /// directory" (the launchd bare-PATH condition, W6.5 row ②).
+    probe_error: Option<String>,
 }
 
 impl MockTmuxQuery {
@@ -144,21 +181,46 @@ impl MockTmuxQuery {
         s.sessions.retain(|n| n != name);
         s.panes.retain(|k, _| !k.starts_with(&format!("{name}:")));
     }
+
+    /// Make every subsequent query fail with `message`. Mirrors the
+    /// real-world "tmux binary unreachable" condition (e.g. a launchd
+    /// daemon whose PATH lacks the Homebrew prefix).
+    pub fn set_probe_error(&self, message: impl Into<String>) {
+        let mut s = self.inner.lock().expect("mock-tmux-query poisoned");
+        s.probe_error = Some(message.into());
+    }
+
+    /// The scripted error, if armed — shared guard for the query methods.
+    fn probe_error(&self) -> Option<evy_core::Error> {
+        let s = self.inner.lock().expect("mock-tmux-query poisoned");
+        s.probe_error
+            .as_ref()
+            .map(|msg| watchdog_io_error("tmux_query", msg.clone()))
+    }
 }
 
 #[async_trait]
 impl TmuxQuery for MockTmuxQuery {
     async fn session_exists(&self, name: &str) -> Result<bool> {
+        if let Some(e) = self.probe_error() {
+            return Err(e);
+        }
         let s = self.inner.lock().expect("mock-tmux-query poisoned");
         Ok(s.sessions.iter().any(|n| n == name))
     }
 
     async fn list_sessions(&self) -> Result<Vec<String>> {
+        if let Some(e) = self.probe_error() {
+            return Err(e);
+        }
         let s = self.inner.lock().expect("mock-tmux-query poisoned");
         Ok(s.sessions.clone())
     }
 
     async fn capture_pane(&self, target: &str, _lines: usize) -> Result<String> {
+        if let Some(e) = self.probe_error() {
+            return Err(e);
+        }
         let s = self.inner.lock().expect("mock-tmux-query poisoned");
         Ok(s.panes.get(target).cloned().unwrap_or_default())
     }
