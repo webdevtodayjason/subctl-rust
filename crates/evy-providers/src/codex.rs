@@ -15,12 +15,21 @@
 //!
 //! HMAC trust marker is omitted in Phase 1 (same TODO as the Claude
 //! adapter — slot for Phase 2 once `evy-comms` provides the signer).
-//! W6.5 ① ported the v3 readiness flow natively: poll for the
-//! `Context … % left` status line, dismiss the "Update available" modal
-//! (`2` + Enter) and the directory-trust dialog (`1` + Enter) before
-//! pasting, beat between paste and Enter, and post-paste delivery check
-//! so a swallowed mandate is loud instead of silent (closet 2026-06-09:
-//! the trust dialog ate the paste despite the `-c trust_level` flag).
+//! W6.5 ① ported the v3 readiness flow natively: poll for readiness,
+//! dismiss the "Update available" modal (`2` + Enter) and the
+//! directory-trust dialog (`1` + Enter) before pasting, beat between
+//! paste and Enter, and post-paste delivery check so a swallowed mandate
+//! is loud instead of silent (closet 2026-06-09: the trust dialog ate
+//! the paste despite the `-c trust_level` flag).
+//!
+//! EA1 (censure follow-up, live evidence 2026-06-12T01:05Z) repinned the
+//! ready-matcher to codex v0.130.0's real boot screens — composer `›`
+//! placeholder plus the `<model> … · <dir>` status line; the old
+//! `Context … % left` line no longer renders at boot — keeping the
+//! legacy line as a backward-compat ready signal. The ready wait is now
+//! hard-capped (deadline + outer timeout), and a [`tmux::WindowGuard`]
+//! guarantees a dispatch that fails or aborts after window creation
+//! tears the window down instead of leaving a live unregistered zombie.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -60,16 +69,33 @@ const MAX_DIALOG_DISMISSALS: u32 = 3;
 /// 2026-06-09 in `/tmp`, where the pasted mandate was lost to it.
 const CODEX_TRUST_MARKER: &str = "Do you trust";
 
-/// The "Update available" modal copy, verified against codex 0.130.0 by
-/// the v3 launcher (providers/openai-codex/teams.sh). Dismissed with
+/// The "Update available" modal copy, verified against codex 0.130.0 live
+/// (Skip-dismissal logged working 2026-06-12T01:05:17Z). Dismissed with
 /// `2` (Skip) + Enter. Both substrings are required to key the dismissal
 /// so a casual mention of updates in output can't trigger it.
 const CODEX_UPDATE_MARKERS: [&str; 2] = ["Update available", "Press enter"];
 
-/// Ready signal: Codex's booted TUI renders `Context 100% left` in the
-/// bottom status line (verified empirically against codex 0.130.0 — same
-/// marker the v3 launcher polls for).
-const CODEX_READY_MARKER: &str = "% left";
+/// Legacy ready signal (pre-v0.130 boot screens): the booted TUI rendered
+/// `Context 100% left` in the bottom status line — the marker the v3
+/// launcher polls for. v0.130.0 does NOT render it at boot (EA1 censure,
+/// 2026-06-12T01:05Z live: ready never fired, dispatch spun, mandate
+/// never pasted). Kept as an accepted ready signal for older codex
+/// versions; the v0.130.0 signals below cover current reality.
+const CODEX_READY_MARKER_LEGACY: &str = "% left";
+
+/// v0.130.0 ready signal, part 1 — the composer prompt/placeholder
+/// chevron `›` (U+203A), e.g. `› Implement {feature}`. Deliberately NOT
+/// the dialog selector `❯` (U+276F), so a dialog screen can't satisfy it
+/// even before the dialog-precedence rule applies.
+const CODEX_COMPOSER_MARKER: &str = "›";
+
+/// Hard wall-clock cap on the ready poll (mirrors the Claude adapter's
+/// ~40s). Enforced twice: a deadline inside [`wait_for_codex_ready`]'s
+/// loop, and a `tokio::time::timeout` at the dispatch call site so even a
+/// wedged `tmux capture-pane` child process can't hang dispatch past the
+/// cap — the censured live dispatch spun >8 min with no warn and no
+/// paste, leaving an unregistered window.
+const READY_WAIT_CAP: Duration = Duration::from_secs(40);
 
 const WAIT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(60 * 60);
@@ -182,6 +208,15 @@ impl Provider for CodexProvider {
         )
         .await?;
 
+        // EA1 register-or-cleanup: from here on, a failed or aborted
+        // dispatch would otherwise leave a live window no registry entry
+        // can reach (live censure 2026-06-12: stuck dispatch, kill →
+        // "unknown worker"). The guard tears the window down on every
+        // exit path except the disarm just before the handle is returned;
+        // the caller (dispatch_and_register) registers that handle
+        // synchronously, so there is no gap.
+        let mut window_guard = tmux::WindowGuard::new(&self.config.tmux_session, &window_name);
+
         // W6.5 ① — provision the verify key so the worker can authenticate
         // the envelope with `subctl directive verify`. Best-effort: failure
         // degrades the worker to --key-file, never loses the spawn.
@@ -204,11 +239,20 @@ impl Provider for CodexProvider {
         .await?;
         tmux::press_enter(SCOPE, &self.config.tmux_session, &window_name).await?;
 
-        // W6.5 ① — wait for the Codex composer (status line) instead of a
-        // blind fixed sleep, dismissing the update modal / trust dialog
-        // that previously swallowed the paste. A short settle follows.
-        if !wait_for_codex_ready(&self.config.tmux_session, &window_name).await {
-            tracing::warn!(window = %window_name, "codex ready status line not seen in time; pasting anyway");
+        // W6.5 ① / EA1 — wait for the Codex composer instead of a blind
+        // fixed sleep, dismissing the update modal / trust dialog that
+        // previously swallowed the paste. Double-capped: the loop's own
+        // deadline plus this outer timeout, so a wedged `tmux
+        // capture-pane` child can never hang dispatch past the cap. A
+        // short settle follows.
+        let ready = tokio::time::timeout(
+            READY_WAIT_CAP + Duration::from_secs(5),
+            wait_for_codex_ready(&self.config.tmux_session, &window_name),
+        )
+        .await
+        .unwrap_or(false);
+        if !ready {
+            tracing::warn!(window = %window_name, "codex ready-marker not seen within cap; pasting anyway");
         }
         sleep(CODEX_BOOT_SLEEP).await;
 
@@ -254,6 +298,9 @@ impl Provider for CodexProvider {
         }
         tmux::press_enter(SCOPE, &self.config.tmux_session, &window_name).await?;
 
+        // Dispatch ran to completion — the handle below is what the
+        // caller registers, so the cleanup guard stands down.
+        window_guard.disarm();
         let handle = CodexWorker {
             inner: Arc::new(WorkerInner {
                 worker_id,
@@ -356,15 +403,30 @@ enum CodexPaneState {
     UpdateModal,
     /// Directory-trust dialog — pasting now loses the directive.
     TrustDialog,
-    /// Booted: the `Context … % left` status line is rendered.
+    /// Booted: the v0.130.0 composer (`›` placeholder + `<model> … · <dir>`
+    /// status line), or the legacy `Context … % left` status line.
     Ready,
     /// Still booting.
     Booting,
 }
 
+/// v0.130.0 ready signal, part 2 — the boot status line has the shape
+/// `<model> <effort> · <dir>` (live 2026-06-12: `gpt-5.5 medium ·
+/// ~/.codex-jason`). Matches the shape, not the literal model/dir: any
+/// pane line with a ` · ` separator and non-empty text on both sides, so
+/// a model or account change can't silently break readiness again.
+fn has_status_line_shape(pane: &str) -> bool {
+    pane.lines().any(|line| {
+        line.split_once(" · ")
+            .is_some_and(|(left, right)| !left.trim().is_empty() && !right.trim().is_empty())
+    })
+}
+
 /// Classify a captured pane. Modal/dialog detection takes precedence over
-/// ready detection — an interstitial must never classify as ready. Pure;
-/// unit-tested below.
+/// ready detection — an interstitial must never classify as ready, no
+/// matter what else is on screen. Ready accepts both the v0.130.0
+/// composer reality (EA1) and the legacy status line (forward+backward
+/// compat). Pure; unit-tested below.
 fn classify_codex_pane(pane: &str) -> CodexPaneState {
     if CODEX_UPDATE_MARKERS.iter().all(|m| pane.contains(m)) {
         return CodexPaneState::UpdateModal;
@@ -372,30 +434,36 @@ fn classify_codex_pane(pane: &str) -> CodexPaneState {
     if pane.contains(CODEX_TRUST_MARKER) {
         return CodexPaneState::TrustDialog;
     }
-    if pane.contains(CODEX_READY_MARKER) {
+    if pane.contains(CODEX_READY_MARKER_LEGACY)
+        || (pane.contains(CODEX_COMPOSER_MARKER) && has_status_line_shape(pane))
+    {
         return CodexPaneState::Ready;
     }
     CodexPaneState::Booting
 }
 
-/// W6.5 ① — poll the worker pane until Codex's TUI is ready for the
-/// directive paste. Ports the v3 launcher's empirically-validated flow
-/// (providers/openai-codex/teams.sh):
+/// W6.5 ①, repinned in EA1 — poll the worker pane until Codex's TUI is
+/// ready for the directive paste:
 ///
 /// - "Update available" modal → `2` (Skip) + Enter, once.
 /// - Directory-trust dialog (seen live 2026-06-09 despite the
 ///   `-c trust_level` launch flag) → `1` (Yes) + Enter, at most
 ///   [`MAX_DIALOG_DISMISSALS`] times.
-/// - Ready = the `Context … % left` status line.
+/// - Ready = v0.130.0 composer `›` + `<model> … · <dir>` status line, or
+///   the legacy `Context … % left` status line (see
+///   [`classify_codex_pane`]).
 ///
-/// Polls every 500ms up to ~40s; returns whether ready was observed
-/// (caller pastes regardless — the post-paste check downstream makes any
-/// loss loud).
+/// Polls every 500ms against a hard [`READY_WAIT_CAP`] wall-clock
+/// deadline (a count-based loop understates elapsed time when dismissal
+/// beats and capture latency stack up); returns whether ready was
+/// observed. The caller pastes regardless after warning — the post-paste
+/// check downstream makes any loss loud.
 async fn wait_for_codex_ready(session: &str, window: &str) -> bool {
     let target = format!("{session}:{window}");
     let mut update_dismissed = false;
     let mut trust_dismissals = 0u32;
-    for _ in 0..80 {
+    let deadline = Instant::now() + READY_WAIT_CAP;
+    while Instant::now() < deadline {
         if let Some(pane) = tmux::tmux_capture(&target, 80).await {
             match classify_codex_pane(&pane) {
                 CodexPaneState::Ready => return true,
@@ -638,7 +706,8 @@ mod tests {
     }
 
     #[test]
-    fn ready_status_line_classifies_ready() {
+    fn legacy_status_line_still_classifies_ready() {
+        // Pre-v0.130 boot screens — backward compat must hold.
         let pane = "╭─╮\n│ ▌ │\n╰─╯\n  Context 100% left · 0 in · 0 out";
         assert_eq!(classify_codex_pane(pane), CodexPaneState::Ready);
     }
@@ -657,5 +726,86 @@ mod tests {
             classify_codex_pane("❯ CODEX_HOME=/x /y/codex\n  loading model…"),
             CodexPaneState::Booting
         );
+    }
+
+    // ── EA1 — v0.130.0 ready-matcher repin ───────────────────────────────
+
+    /// THE censure fixture (2026-06-12T01:05Z live): codex v0.130.0
+    /// booted clean to the composer — banner, `› Implement {feature}`
+    /// placeholder, `gpt-5.5 medium · ~/.codex-jason` status line — and
+    /// the `% left`-pinned matcher never fired ready, so the dispatch
+    /// spun and the mandate was never pasted.
+    const V0130_COMPOSER_PANE: &str = "\
+>_ OpenAI Codex (v0.130.0)
+
+  To get started, describe a task or try one of these commands:
+
+  /init - create an AGENTS.md file with instructions for Codex
+
+╭──────────────────────────────────────────╮
+│ › Implement {feature}                    │
+╰──────────────────────────────────────────╯
+  gpt-5.5 medium · ~/.codex-jason
+";
+
+    #[test]
+    fn v0130_composer_screen_classifies_ready() {
+        assert_eq!(
+            classify_codex_pane(V0130_COMPOSER_PANE),
+            CodexPaneState::Ready
+        );
+        assert!(
+            !V0130_COMPOSER_PANE.contains("% left"),
+            "fixture must reproduce the censure: no legacy status line at v0.130.0 boot"
+        );
+    }
+
+    #[test]
+    fn v0130_status_line_shape_survives_model_and_dir_changes() {
+        // The matcher pins the shape, not the literals — a different
+        // model/effort/account must still classify ready.
+        let pane = "│ › Find a bug │\n  o5-mini high · /Users/op/.codex-argent";
+        assert_eq!(classify_codex_pane(pane), CodexPaneState::Ready);
+    }
+
+    #[test]
+    fn composer_chevron_alone_is_not_ready() {
+        // Half-drawn frame: placeholder rendered, status line not yet.
+        assert_eq!(
+            classify_codex_pane("│ › Implement {feature} │"),
+            CodexPaneState::Booting
+        );
+    }
+
+    #[test]
+    fn status_line_alone_is_not_ready() {
+        // Status line without the composer (mid-redraw) must not paste.
+        assert_eq!(
+            classify_codex_pane("  gpt-5.5 medium · ~/.codex-jason"),
+            CodexPaneState::Booting
+        );
+    }
+
+    #[test]
+    fn dialog_selector_chevron_is_not_the_composer_chevron() {
+        // The dialog selector is `❯` (U+276F); the composer marker is `›`
+        // (U+203A). A scrolled dialog fragment plus an incidental `·`
+        // line must not satisfy the v0.130.0 ready signals.
+        let pane = " ❯ 1. Yes, continue\n   2. No, quit\n  gpt-5.5 medium · /tmp/proj";
+        assert_eq!(classify_codex_pane(pane), CodexPaneState::Booting);
+    }
+
+    #[test]
+    fn trust_dialog_wins_over_v0130_composer() {
+        let pane = format!("{V0130_COMPOSER_PANE}\n Do you trust the contents of this directory?");
+        assert_eq!(classify_codex_pane(&pane), CodexPaneState::TrustDialog);
+    }
+
+    #[test]
+    fn update_modal_wins_over_v0130_composer() {
+        let pane = format!(
+            "Update available! 0.130.0 → 0.131.0\nPress enter to confirm\n{V0130_COMPOSER_PANE}"
+        );
+        assert_eq!(classify_codex_pane(&pane), CodexPaneState::UpdateModal);
     }
 }
