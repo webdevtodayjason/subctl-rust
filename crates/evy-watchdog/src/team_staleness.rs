@@ -46,6 +46,7 @@ use chrono::Utc;
 use evy_comms::DaemonEvent;
 use evy_core::Result;
 
+use crate::error::watchdog_io_error;
 use crate::report::{Finding, TickReport};
 use crate::team_registry::TeamRegistry;
 use crate::tmux_query::TmuxQuery;
@@ -142,12 +143,28 @@ impl Watchdog for TeamStalenessWatchdog {
         // `(team_name, age_minutes)` pairs backing the `watchdog_fire`
         // frame's prompt + stale array (the cockpit's wire contract).
         let mut stale_teams: Vec<(String, i64)> = Vec::new();
+        // `<team>: <error>` per failed tmux probe. W6.5 row ② — a probe
+        // failure must NOT abort the tick before the cockpit emit below;
+        // the frame is the operator's only live ok/fire signal, and `?`
+        // here silenced it in production for as long as any team row
+        // existed on a daemon that couldn't spawn tmux.
+        let mut probe_failures: Vec<String> = Vec::new();
 
         for record in teams {
             // Regression sentinel for the 2026-05-18 bug — never page
             // on a team whose session is already gone; that's
             // TeamGcWatchdog / WatchdogPrune territory.
-            let session_alive = self.tmux.session_exists(&record.tmux_session).await?;
+            let session_alive = match self.tmux.session_exists(&record.tmux_session).await {
+                Ok(alive) => alive,
+                // Can't probe → can't claim stale. Skip the record
+                // (benefit of the doubt, same spirit as the
+                // no-activity carve-out below) and surface the error
+                // through the diag registry after the emit.
+                Err(e) => {
+                    probe_failures.push(format!("{}: {e}", record.team_id));
+                    continue;
+                }
+            };
             if !session_alive {
                 continue;
             }
@@ -196,6 +213,20 @@ impl Watchdog for TeamStalenessWatchdog {
             let stale_names: Vec<String> = stale_teams.into_iter().map(|(name, _)| name).collect();
             ctx.events
                 .emit(DaemonEvent::dashboard_watchdog_fire(&prompt, &stale_names));
+        }
+
+        // Probe failures surface AFTER the emit so the diag registry
+        // records the error (truthful `last_error`) without the cockpit
+        // stream going dark — emit-then-error, never error-then-silence.
+        if !probe_failures.is_empty() {
+            return Err(watchdog_io_error(
+                self.name(),
+                format!(
+                    "tmux probe failed for {} of {teams_tracked} team(s) — {}",
+                    probe_failures.len(),
+                    probe_failures.join("; ")
+                ),
+            ));
         }
 
         if findings.is_empty() {
@@ -480,5 +511,44 @@ mod tests {
         assert_eq!(event, "watchdog_ok");
         assert_eq!(data["teams_tracked"], 1);
         assert_eq!(data["stale"], 0);
+    }
+
+    #[tokio::test]
+    async fn failed_probe_still_emits_cockpit_frame_and_surfaces_error() {
+        // W6.5 row ② regression pin — the production silence: a daemon
+        // whose tmux probe fails (launchd bare PATH → spawn ENOENT)
+        // must still broadcast the cockpit ok/fire frame. The old `?`
+        // aborted the tick before the emit, going dark for as long as
+        // any team row existed.
+        let (ctx, _guards) = watchdog_ctx().await;
+        let mut rx = ctx.events.subscribe();
+        let teams = registry_with(vec![TeamRecord {
+            team_id: "unprobeable".into(),
+            tmux_session: "claude-unprobeable".into(),
+            last_activity: Some(Utc::now() - ChronoDuration::hours(2)),
+        }]);
+        let tmux = Arc::new(MockTmuxQuery::new());
+        tmux.set_probe_error("spawn tmux: No such file or directory (os error 2)");
+        let w = TeamStalenessWatchdog::new(teams.clone(), tmux);
+
+        // Emit-then-error: the frame flows AND the tick reports the
+        // probe failure so the diag registry's `last_error` stays
+        // truthful.
+        let err = w.tick(&ctx).await.expect_err("probe failure must surface");
+        assert!(
+            err.to_string().contains("tmux probe failed for 1 of 1"),
+            "error names the failure scope: {err}"
+        );
+
+        let (event, data) = next_dashboard_frame(&mut rx);
+        assert_eq!(event, "watchdog_ok");
+        assert_eq!(data["teams_tracked"], 1);
+        assert_eq!(
+            data["stale"], 0,
+            "unprobeable teams are never claimed stale"
+        );
+        // And the unprobeable team stays registered — pruning is not
+        // this watchdog's job, least of all on a blind tick.
+        assert_eq!(teams.len(), 1);
     }
 }

@@ -285,4 +285,57 @@ mod tests {
         assert_eq!(data["stale"], 0);
         registry.shutdown();
     }
+
+    #[tokio::test]
+    async fn boot_tick_broadcasts_watchdog_ok_even_when_tmux_is_unreachable() {
+        // W6.5 row ② — the test that would have caught the production
+        // silence. The companion test above proves the boot tick on an
+        // EMPTY registry (W4's live proof took the same path: no rows →
+        // no tmux probe). The deployed daemon went dark the moment a
+        // real team row landed, because launchd's bare PATH made every
+        // tmux probe fail and the staleness tick aborted BEFORE its
+        // emit. Same boot wiring as `run_daemon`: default set, shared
+        // broadcaster, SSE-subscribed receiver — but with a team row
+        // present and every probe erroring like production.
+        let (ctx, _guards) = watchdog_ctx().await;
+        let mut rx = ctx.events.subscribe();
+        let teams = Arc::new(InMemoryTeamRegistry::new());
+        teams.insert(crate::team_registry::TeamRecord {
+            team_id: "w65-team".into(),
+            tmux_session: "claude-w65-team".into(),
+            last_activity: Some(chrono::Utc::now()),
+        });
+        let tmux = Arc::new(MockTmuxQuery::new());
+        tmux.set_probe_error("spawn tmux: No such file or directory (os error 2)");
+
+        let registry = WatchdogDiagRegistry::new();
+        register_default_watchdogs(
+            &registry,
+            ctx.scheduler.clone(),
+            ctx.events.clone(),
+            ctx.obs_log.clone(),
+            teams,
+            tmux,
+            WorkerRegistry::new(),
+        );
+
+        let frame = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                match rx.recv().await.expect("broadcaster open") {
+                    evy_comms::DaemonEvent::DashboardFrame { event, data }
+                        if event == "watchdog_ok" =>
+                    {
+                        break data;
+                    }
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .expect("boot tick must broadcast watchdog_ok despite failed tmux probes");
+        let data: serde_json::Value = serde_json::from_str(&frame).expect("frame data is JSON");
+        assert_eq!(data["teams_tracked"], 1);
+        assert_eq!(data["stale"], 0);
+        registry.shutdown();
+    }
 }
