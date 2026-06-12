@@ -268,6 +268,82 @@ pub(crate) async fn kill_window(scope: TmuxScope, session: &str, window: &str) -
     })
 }
 
+/// Drop-guard that tears down a freshly created worker window unless the
+/// dispatch that created it runs to completion (EA1 register-or-cleanup).
+///
+/// Between `tmux new-window` and the caller registering the returned
+/// worker handle, an error return — or the dispatch future being dropped
+/// mid-await (task abort, request timeout) — used to leave a live,
+/// unregistered window: a zombie no registry entry could reach (live
+/// censure 2026-06-12T01:05Z, "kill → unknown worker"). Arm the guard
+/// right after window creation and [`disarm`](Self::disarm) it only when
+/// the handle is about to be returned; every other exit path kills the
+/// window and logs loudly.
+///
+/// `Drop` can't await, so the kill shells out via `std::process::Command`
+/// (blocking, single fast tmux call). Best-effort: a failed kill still
+/// logs the zombie instead of silently leaking it.
+pub struct WindowGuard {
+    target: String,
+    armed: bool,
+}
+
+impl WindowGuard {
+    /// Arm a guard for `<session>:<window>`.
+    #[must_use]
+    pub fn new(session: &str, window: &str) -> Self {
+        Self {
+            target: format!("{session}:{window}"),
+            armed: true,
+        }
+    }
+
+    /// Defuse the guard — dispatch succeeded and the caller is about to
+    /// hand the worker handle to the registry.
+    pub fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for WindowGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        tracing::warn!(
+            target_window = %self.target,
+            "dispatch did not complete after window creation; tearing the window down (register-or-cleanup)"
+        );
+        let result = std::process::Command::new(tmux_bin().as_ref())
+            .args(["kill-window", "-t", &self.target])
+            .output();
+        match result {
+            Ok(o) if o.status.success() => {
+                tracing::warn!(target_window = %self.target, "unregistered worker window torn down");
+            }
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                if stderr.contains("can't find") {
+                    tracing::warn!(target_window = %self.target, "window already gone at teardown");
+                } else {
+                    tracing::error!(
+                        target_window = %self.target,
+                        %stderr,
+                        "failed to tear down unregistered worker window — manual cleanup needed"
+                    );
+                }
+            }
+            Err(err) => {
+                tracing::error!(
+                    target_window = %self.target,
+                    %err,
+                    "failed to spawn tmux for zombie-window teardown — manual cleanup needed"
+                );
+            }
+        }
+    }
+}
+
 /// `tmux list-windows -t <session> -F '#{window_name}'` → membership
 /// check for `window`.
 pub(crate) async fn window_exists(scope: TmuxScope, session: &str, window: &str) -> Result<bool> {

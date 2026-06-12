@@ -51,7 +51,8 @@ pub use oauth::{
     AccessToken, AccountRecord, AccountRow, AccountsStore, CodexOauth, DeviceCodeResponse,
     OauthError, OauthFlow, RefreshDedup, TokenRecord, XaiOauth,
 };
-pub use tmux::{tmux_capture, tmux_kill_session, tmux_session_alive};
+// EA1 — WindowGuard promoted for the register-or-cleanup integration test.
+pub use tmux::{tmux_capture, tmux_kill_session, tmux_session_alive, WindowGuard};
 
 #[cfg(test)]
 mod object_safety {
