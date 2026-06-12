@@ -15,8 +15,12 @@
 //!
 //! HMAC trust marker is omitted in Phase 1 (same TODO as the Claude
 //! adapter — slot for Phase 2 once `evy-comms` provides the signer).
-//! The Codex update-modal dismissal + `Context % left` ready-poll
-//! from v3 are also Phase-2 work; Phase 1 uses a fixed 2s sleep.
+//! W6.5 ① ported the v3 readiness flow natively: poll for the
+//! `Context … % left` status line, dismiss the "Update available" modal
+//! (`2` + Enter) and the directory-trust dialog (`1` + Enter) before
+//! pasting, beat between paste and Enter, and post-paste delivery check
+//! so a swallowed mandate is loud instead of silent (closet 2026-06-09:
+//! the trust dialog ate the paste despite the `-c trust_level` flag).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -35,10 +39,37 @@ use crate::tmux::{self, TmuxScope};
 
 const SCOPE: TmuxScope = TmuxScope(ProviderKind::Codex);
 
-/// Phase-1 boot delay after `codex` launch before the directive is
-/// pasted. TODO(phase-2): replace with capture-pane polling for
-/// `Context % left` and dismissal of the "Update available" modal.
+/// Short settle after the TUI reports ready and before the directive
+/// paste. The primary wait is [`wait_for_codex_ready`] (poll); this just
+/// covers the gap between the status line rendering and the composer
+/// accepting input.
 const CODEX_BOOT_SLEEP: Duration = Duration::from_secs(2);
+
+/// Beat between the directive paste and the submitting Enter — same
+/// rationale as the Claude adapter's `PASTE_TO_ENTER_BEAT` (the closet
+/// entry for the 2026-06-09 codex mandate loss explicitly calls for it).
+const PASTE_TO_ENTER_BEAT: Duration = Duration::from_millis(500);
+
+/// Upper bound on deliberate trust-dialog dismissals during one
+/// ready-wait (same rationale as the Claude adapter).
+const MAX_DIALOG_DISMISSALS: u32 = 3;
+
+/// Codex's first-run directory-trust dialog ("Do you trust the contents
+/// of this directory?"). Renders despite the `-c projects.….trust_level`
+/// launch flag in some codex versions / cwd states — observed live
+/// 2026-06-09 in `/tmp`, where the pasted mandate was lost to it.
+const CODEX_TRUST_MARKER: &str = "Do you trust";
+
+/// The "Update available" modal copy, verified against codex 0.130.0 by
+/// the v3 launcher (providers/openai-codex/teams.sh). Dismissed with
+/// `2` (Skip) + Enter. Both substrings are required to key the dismissal
+/// so a casual mention of updates in output can't trigger it.
+const CODEX_UPDATE_MARKERS: [&str; 2] = ["Update available", "Press enter"];
+
+/// Ready signal: Codex's booted TUI renders `Context 100% left` in the
+/// bottom status line (verified empirically against codex 0.130.0 — same
+/// marker the v3 launcher polls for).
+const CODEX_READY_MARKER: &str = "% left";
 
 const WAIT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(60 * 60);
@@ -151,6 +182,17 @@ impl Provider for CodexProvider {
         )
         .await?;
 
+        // W6.5 ① — provision the verify key so the worker can authenticate
+        // the envelope with `subctl directive verify`. Best-effort: failure
+        // degrades the worker to --key-file, never loses the spawn.
+        if let Err(err) = crate::claude_code::provision_directive_key(&self.config.codex_home, key)
+        {
+            tracing::warn!(
+                %err,
+                "failed to provision .subctl-directive-key in CODEX_HOME; worker-side `subctl directive verify` will need --key-file"
+            );
+        }
+
         let launch_line = launch_command(&self.config)?;
         debug!(launch = %launch_line, "launching codex CLI in worker window");
         tmux::send_keys(
@@ -162,6 +204,12 @@ impl Provider for CodexProvider {
         .await?;
         tmux::press_enter(SCOPE, &self.config.tmux_session, &window_name).await?;
 
+        // W6.5 ① — wait for the Codex composer (status line) instead of a
+        // blind fixed sleep, dismissing the update modal / trust dialog
+        // that previously swallowed the paste. A short settle follows.
+        if !wait_for_codex_ready(&self.config.tmux_session, &window_name).await {
+            tracing::warn!(window = %window_name, "codex ready status line not seen in time; pasting anyway");
+        }
         sleep(CODEX_BOOT_SLEEP).await;
 
         let buffer_name = buffer_name_for(worker_id);
@@ -173,6 +221,37 @@ impl Provider for CodexProvider {
             &directive,
         )
         .await?;
+        info!(
+            worker = ?worker_id,
+            window = %window_name,
+            directive_bytes = directive.len(),
+            "directive paste complete; checking delivery before submit"
+        );
+
+        // Beat + post-paste delivery check — same provable-delivery
+        // sequence as the Claude adapter (see its dispatch for rationale).
+        sleep(PASTE_TO_ENTER_BEAT).await;
+        let paste_target = format!("{}:{}", self.config.tmux_session, window_name);
+        match tmux::tmux_capture(&paste_target, 80).await {
+            Some(pane) if crate::claude_code::directive_visible(&pane) => {
+                info!(window = %window_name, "directive visible in composer; submitting");
+            }
+            Some(pane) => {
+                let tail: Vec<&str> = pane.lines().rev().take(5).collect();
+                let tail = tail.into_iter().rev().collect::<Vec<_>>().join(" | ");
+                tracing::warn!(
+                    window = %window_name,
+                    pane_tail = %tail,
+                    "POST-PASTE CHECK FAILED — directive not visible in pane; the mandate may have been swallowed (trust/update modal race?). Submitting anyway; inspect this worker"
+                );
+            }
+            None => {
+                tracing::warn!(
+                    window = %window_name,
+                    "post-paste pane capture failed; cannot prove directive delivery"
+                );
+            }
+        }
         tmux::press_enter(SCOPE, &self.config.tmux_session, &window_name).await?;
 
         let handle = CodexWorker {
@@ -267,6 +346,89 @@ impl WorkerHandle for CodexWorker {
             sleep(WAIT_POLL_INTERVAL).await;
         }
     }
+}
+
+/// What a captured Codex pane is currently showing. Same shape as the
+/// Claude adapter's `PaneState`, with the extra update-modal arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexPaneState {
+    /// "Update available" modal — dismissed with `2` (Skip) + Enter.
+    UpdateModal,
+    /// Directory-trust dialog — pasting now loses the directive.
+    TrustDialog,
+    /// Booted: the `Context … % left` status line is rendered.
+    Ready,
+    /// Still booting.
+    Booting,
+}
+
+/// Classify a captured pane. Modal/dialog detection takes precedence over
+/// ready detection — an interstitial must never classify as ready. Pure;
+/// unit-tested below.
+fn classify_codex_pane(pane: &str) -> CodexPaneState {
+    if CODEX_UPDATE_MARKERS.iter().all(|m| pane.contains(m)) {
+        return CodexPaneState::UpdateModal;
+    }
+    if pane.contains(CODEX_TRUST_MARKER) {
+        return CodexPaneState::TrustDialog;
+    }
+    if pane.contains(CODEX_READY_MARKER) {
+        return CodexPaneState::Ready;
+    }
+    CodexPaneState::Booting
+}
+
+/// W6.5 ① — poll the worker pane until Codex's TUI is ready for the
+/// directive paste. Ports the v3 launcher's empirically-validated flow
+/// (providers/openai-codex/teams.sh):
+///
+/// - "Update available" modal → `2` (Skip) + Enter, once.
+/// - Directory-trust dialog (seen live 2026-06-09 despite the
+///   `-c trust_level` launch flag) → `1` (Yes) + Enter, at most
+///   [`MAX_DIALOG_DISMISSALS`] times.
+/// - Ready = the `Context … % left` status line.
+///
+/// Polls every 500ms up to ~40s; returns whether ready was observed
+/// (caller pastes regardless — the post-paste check downstream makes any
+/// loss loud).
+async fn wait_for_codex_ready(session: &str, window: &str) -> bool {
+    let target = format!("{session}:{window}");
+    let mut update_dismissed = false;
+    let mut trust_dismissals = 0u32;
+    for _ in 0..80 {
+        if let Some(pane) = tmux::tmux_capture(&target, 80).await {
+            match classify_codex_pane(&pane) {
+                CodexPaneState::Ready => return true,
+                CodexPaneState::UpdateModal if !update_dismissed => {
+                    update_dismissed = true;
+                    tracing::warn!(%target, "codex update modal rendered; dismissing with Skip");
+                    let _ = tmux::send_keys(SCOPE, session, window, &["2"]).await;
+                    sleep(Duration::from_millis(200)).await;
+                    let _ = tmux::press_enter(SCOPE, session, window).await;
+                    sleep(Duration::from_millis(800)).await;
+                    continue;
+                }
+                CodexPaneState::TrustDialog if trust_dismissals < MAX_DIALOG_DISMISSALS => {
+                    trust_dismissals += 1;
+                    tracing::warn!(
+                        %target,
+                        attempt = trust_dismissals,
+                        "codex trust dialog rendered despite trust_level flag; dismissing deliberately"
+                    );
+                    let _ = tmux::send_keys(SCOPE, session, window, &["1"]).await;
+                    sleep(Duration::from_millis(200)).await;
+                    let _ = tmux::press_enter(SCOPE, session, window).await;
+                    sleep(Duration::from_millis(800)).await;
+                    continue;
+                }
+                CodexPaneState::UpdateModal
+                | CodexPaneState::TrustDialog
+                | CodexPaneState::Booting => {}
+            }
+        }
+        sleep(Duration::from_millis(500)).await;
+    }
+    false
 }
 
 /// Compose the Codex launch line. Mirrors v3 teams.sh: `CODEX_HOME` set
@@ -439,5 +601,61 @@ mod tests {
         // `working_dir` is reachable through the visible-for-testing
         // accessor — useful when binary-wirer wants to log the spawn.
         assert_eq!(p.config().working_dir, Path::new("/tmp/codex-test"));
+    }
+
+    // ── W6.5 ① — readiness classifier ────────────────────────────────────
+
+    #[test]
+    fn trust_dialog_is_not_ready() {
+        // Regression fixture for the 2026-06-09 live mandate loss: codex
+        // booted to the trust dialog in /tmp and the paste was swallowed.
+        let pane = "\
+❯ CODEX_HOME=/Users/op/.codex-jason /opt/homebrew/bin/codex
+
+  Do you trust the contents of this directory?
+
+  /tmp/codex-test
+
+  ❯ 1. Yes, continue
+    2. No, quit
+";
+        assert_eq!(classify_codex_pane(pane), CodexPaneState::TrustDialog);
+    }
+
+    #[test]
+    fn update_modal_requires_both_markers_and_wins_over_trust() {
+        let modal = "Update available! 0.130.0 → 0.131.0\nPress enter to update\n  2. Skip";
+        assert_eq!(classify_codex_pane(modal), CodexPaneState::UpdateModal);
+        // A stray "Update available" in scrollback without the prompt copy
+        // must NOT key the dismissal.
+        assert_eq!(
+            classify_codex_pane("changelog: Update available banner removed"),
+            CodexPaneState::Booting
+        );
+        // Both interstitials on screen → dismiss the modal first (v3 order).
+        let both = format!("{modal}\nDo you trust the contents of this directory?");
+        assert_eq!(classify_codex_pane(&both), CodexPaneState::UpdateModal);
+    }
+
+    #[test]
+    fn ready_status_line_classifies_ready() {
+        let pane = "╭─╮\n│ ▌ │\n╰─╯\n  Context 100% left · 0 in · 0 out";
+        assert_eq!(classify_codex_pane(pane), CodexPaneState::Ready);
+    }
+
+    #[test]
+    fn ready_marker_does_not_override_trust_dialog() {
+        // If the status line and the dialog somehow coexist (resize race),
+        // the dialog must win — pasting into it loses the directive.
+        let pane = "Context 100% left\nDo you trust the contents of this directory?";
+        assert_eq!(classify_codex_pane(pane), CodexPaneState::TrustDialog);
+    }
+
+    #[test]
+    fn booting_banner_is_not_ready() {
+        assert_eq!(
+            classify_codex_pane("❯ CODEX_HOME=/x /y/codex\n  loading model…"),
+            CodexPaneState::Booting
+        );
     }
 }
