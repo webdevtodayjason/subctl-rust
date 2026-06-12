@@ -27,6 +27,7 @@ fn cfg(server_url: &str) -> LmStudioConfig {
         max_tokens: 256,
         temperature: 0.7,
         timeout: Duration::from_secs(5),
+        tools_enabled: false,
     }
 }
 

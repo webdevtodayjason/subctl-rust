@@ -241,111 +241,13 @@ impl AppState for DaemonAppState {
         self.watchdog_diag.clone()
     }
 
-    /// Cutover Phase 2 (2j) — spawn a real Claude Code worker on `req.account`:
-    /// resolve the account from `accounts.conf`, ensure its tmux session exists
-    /// (2e), construct an account-pinned `ClaudeCodeProvider`, then dispatch +
-    /// register (2c) so `workers()` reflects it. Closes criterion #1 live.
+    /// Cutover Phase 2 (2j) — spawn a real Claude Code worker on `req.account`.
+    /// Delegates to [`spawn_worker_shared`] — the single spawn path the
+    /// dashboard and Evy's `evy_spawn_worker` agency tool both ride, so
+    /// registry rows, SSE frames, and the Gated policy posture stay
+    /// identical regardless of who initiated the spawn.
     async fn spawn_worker(&self, req: SpawnRequest) -> std::result::Result<WorkerId, SpawnError> {
-        let store = AccountsStore::open(&accounts_conf_path())
-            .map_err(|e| SpawnError::Spawn(e.to_string()))?;
-        let row = store
-            .find_row(&req.account)
-            .map_err(|e| SpawnError::Spawn(e.to_string()))?
-            .ok_or_else(|| SpawnError::AccountNotFound(req.account.clone()))?;
-
-        let working_dir = req
-            .project
-            .as_ref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| row.config_dir.clone());
-        let session_slug = working_dir
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("evy")
-            .replace([' ', '.', ':'], "_");
-
-        // Route on the account's provider (2i — codex-teams completes criterion #1).
-        let is_codex = row.provider == "openai-codex";
-        let provider_kind = if is_codex {
-            ProviderKind::Codex
-        } else {
-            ProviderKind::ClaudeCode
-        };
-        let mandate = Mandate {
-            id: MandateId::new(),
-            provider: provider_kind,
-            goal: req.goal,
-            context: String::new(),
-            deliverable: String::new(),
-            done_when: Vec::new(),
-            constraints: Vec::new(),
-            policy_mode: PolicyMode::Gated,
-            timeout: None,
-            metadata: HashMap::new(),
-        };
-        let now_ms = chrono::Utc::now().timestamp_millis();
-
-        let (worker_id, session) = if is_codex {
-            let session = format!("codex-{session_slug}");
-            let provider = CodexProvider::new(CodexConfig {
-                codex_home: row.config_dir.clone(),
-                codex_bin: codex_bin_path(),
-                tmux_session: session.clone(),
-                working_dir,
-                model: None, // Codex picks per its config.toml (operator seeds gpt-5.5).
-                policy_mode: PolicyMode::Gated,
-                hmac_key: None,
-            });
-            provider
-                .ensure_session()
-                .await
-                .map_err(|e| SpawnError::Spawn(e.to_string()))?;
-            let id = crate::dispatch::dispatch_and_register(
-                &provider,
-                &mandate,
-                &self.worker_registry,
-                &self.broadcaster,
-                now_ms,
-            )
-            .await
-            .map_err(|e| SpawnError::Spawn(e.to_string()))?;
-            (id, session)
-        } else {
-            let session = format!("claude-{session_slug}");
-            let provider = ClaudeCodeProvider::new(ClaudeCodeConfig {
-                claude_config_dir: row.config_dir.clone(),
-                claude_bin: claude_bin_path(),
-                tmux_session: session.clone(),
-                working_dir,
-                policy_mode: PolicyMode::Gated,
-                hmac_key: None,
-            });
-            provider
-                .ensure_session()
-                .await
-                .map_err(|e| SpawnError::Spawn(e.to_string()))?;
-            let id = crate::dispatch::dispatch_and_register(
-                &provider,
-                &mandate,
-                &self.worker_registry,
-                &self.broadcaster,
-                now_ms,
-            )
-            .await
-            .map_err(|e| SpawnError::Spawn(e.to_string()))?;
-            (id, session)
-        };
-        // 2l — record the hosting session so the Orch panel can probe liveness + kill.
-        self.worker_registry
-            .set_tmux_session(&worker_id, session.clone());
-        // Registry change → named `team_event` frame for the dashboard
-        // cockpit's live feed (orch.js renders {team, type, text}).
-        self.broadcaster.emit(DaemonEvent::dashboard_team_event(
-            &session,
-            "spawn",
-            &format!("worker {} — {}", worker_id.0, mandate.goal),
-        ));
-        Ok(worker_id)
+        spawn_worker_shared(&self.worker_registry, &self.broadcaster, req).await
     }
 
     async fn orchestrations(&self) -> Vec<evy_comms::OrchestrationRow> {
@@ -369,25 +271,10 @@ impl AppState for DaemonAppState {
         rows
     }
 
+    /// Delegates to [`kill_worker_shared`] — same single-path rule as
+    /// [`Self::spawn_worker`].
     async fn kill_worker(&self, id: WorkerId) -> std::result::Result<bool, SpawnError> {
-        let Some(rec) = self.worker_registry.get(&id) else {
-            return Ok(false); // unknown worker — nothing to kill
-        };
-        if let Some(session) = rec.tmux_session.as_deref() {
-            evy_providers::tmux_kill_session(session)
-                .await
-                .map_err(|e| SpawnError::Spawn(e.to_string()))?;
-        }
-        self.worker_registry.remove(&id);
-        // Registry change → named `team_event` frame for the dashboard
-        // cockpit's live feed (orch.js renders {team, type, text}).
-        let team = rec.tmux_session.clone().unwrap_or_else(|| id.0.to_string());
-        self.broadcaster.emit(DaemonEvent::dashboard_team_event(
-            &team,
-            "kill",
-            &format!("worker {} killed", id.0),
-        ));
-        Ok(true)
+        kill_worker_shared(&self.worker_registry, &self.broadcaster, id).await
     }
 
     async fn orchestration_captures(&self, lines: usize) -> Vec<evy_comms::OrchestrationCapture> {
@@ -409,8 +296,146 @@ impl AppState for DaemonAppState {
     }
 }
 
+/// Cutover Phase 2 (2j) / EA1 — the single spawn path. Resolve the
+/// account from `accounts.conf`, ensure its tmux session exists (2e),
+/// construct an account-pinned provider, then dispatch + register (2c)
+/// so `workers()` reflects it. Both the dashboard's
+/// `AppState::spawn_worker` and Evy's `evy_spawn_worker` agency tool
+/// call through here.
+pub(crate) async fn spawn_worker_shared(
+    worker_registry: &WorkerRegistry,
+    broadcaster: &EventBroadcaster,
+    req: SpawnRequest,
+) -> std::result::Result<WorkerId, SpawnError> {
+    let store =
+        AccountsStore::open(&accounts_conf_path()).map_err(|e| SpawnError::Spawn(e.to_string()))?;
+    let row = store
+        .find_row(&req.account)
+        .map_err(|e| SpawnError::Spawn(e.to_string()))?
+        .ok_or_else(|| SpawnError::AccountNotFound(req.account.clone()))?;
+
+    let working_dir = req
+        .project
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| row.config_dir.clone());
+    let session_slug = working_dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("evy")
+        .replace([' ', '.', ':'], "_");
+
+    // Route on the account's provider (2i — codex-teams completes criterion #1).
+    let is_codex = row.provider == "openai-codex";
+    let provider_kind = if is_codex {
+        ProviderKind::Codex
+    } else {
+        ProviderKind::ClaudeCode
+    };
+    let mandate = Mandate {
+        id: MandateId::new(),
+        provider: provider_kind,
+        goal: req.goal,
+        context: String::new(),
+        deliverable: String::new(),
+        done_when: Vec::new(),
+        constraints: Vec::new(),
+        policy_mode: PolicyMode::Gated,
+        timeout: None,
+        metadata: HashMap::new(),
+    };
+    let now_ms = chrono::Utc::now().timestamp_millis();
+
+    let (worker_id, session) = if is_codex {
+        let session = format!("codex-{session_slug}");
+        let provider = CodexProvider::new(CodexConfig {
+            codex_home: row.config_dir.clone(),
+            codex_bin: codex_bin_path(),
+            tmux_session: session.clone(),
+            working_dir,
+            model: None, // Codex picks per its config.toml (operator seeds gpt-5.5).
+            policy_mode: PolicyMode::Gated,
+            hmac_key: None,
+        });
+        provider
+            .ensure_session()
+            .await
+            .map_err(|e| SpawnError::Spawn(e.to_string()))?;
+        let id = crate::dispatch::dispatch_and_register(
+            &provider,
+            &mandate,
+            worker_registry,
+            broadcaster,
+            now_ms,
+        )
+        .await
+        .map_err(|e| SpawnError::Spawn(e.to_string()))?;
+        (id, session)
+    } else {
+        let session = format!("claude-{session_slug}");
+        let provider = ClaudeCodeProvider::new(ClaudeCodeConfig {
+            claude_config_dir: row.config_dir.clone(),
+            claude_bin: claude_bin_path(),
+            tmux_session: session.clone(),
+            working_dir,
+            policy_mode: PolicyMode::Gated,
+            hmac_key: None,
+        });
+        provider
+            .ensure_session()
+            .await
+            .map_err(|e| SpawnError::Spawn(e.to_string()))?;
+        let id = crate::dispatch::dispatch_and_register(
+            &provider,
+            &mandate,
+            worker_registry,
+            broadcaster,
+            now_ms,
+        )
+        .await
+        .map_err(|e| SpawnError::Spawn(e.to_string()))?;
+        (id, session)
+    };
+    // 2l — record the hosting session so the Orch panel can probe liveness + kill.
+    worker_registry.set_tmux_session(&worker_id, session.clone());
+    // Registry change → named `team_event` frame for the dashboard
+    // cockpit's live feed (orch.js renders {team, type, text}).
+    broadcaster.emit(DaemonEvent::dashboard_team_event(
+        &session,
+        "spawn",
+        &format!("worker {} — {}", worker_id.0, mandate.goal),
+    ));
+    Ok(worker_id)
+}
+
+/// The single kill path — see [`spawn_worker_shared`].
+pub(crate) async fn kill_worker_shared(
+    worker_registry: &WorkerRegistry,
+    broadcaster: &EventBroadcaster,
+    id: WorkerId,
+) -> std::result::Result<bool, SpawnError> {
+    let Some(rec) = worker_registry.get(&id) else {
+        return Ok(false); // unknown worker — nothing to kill
+    };
+    if let Some(session) = rec.tmux_session.as_deref() {
+        evy_providers::tmux_kill_session(session)
+            .await
+            .map_err(|e| SpawnError::Spawn(e.to_string()))?;
+    }
+    worker_registry.remove(&id);
+    // Registry change → named `team_event` frame for the dashboard
+    // cockpit's live feed (orch.js renders {team, type, text}).
+    let team = rec.tmux_session.clone().unwrap_or_else(|| id.0.to_string());
+    broadcaster.emit(DaemonEvent::dashboard_team_event(
+        &team,
+        "kill",
+        &format!("worker {} killed", id.0),
+    ));
+    Ok(true)
+}
+
 /// Path to `accounts.conf` (`SUBCTL_ACCOUNTS_CONF` or `~/.config/subctl/accounts.conf`).
-fn accounts_conf_path() -> PathBuf {
+pub(crate) fn accounts_conf_path() -> PathBuf {
     std::env::var("SUBCTL_ACCOUNTS_CONF")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
