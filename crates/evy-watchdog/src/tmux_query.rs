@@ -37,9 +37,18 @@ use crate::error::watchdog_io_error;
 /// well-known Homebrew / local prefixes. Falls back to the bare name so
 /// the spawn error stays the honest "spawn tmux: No such file or
 /// directory" when tmux truly isn't installed.
+///
+/// Honors the same `EVY_TMUX_BIN` override as `evy-providers`' private
+/// `tmux_bin()` — the resolver this one mirrors (that crate's helper is
+/// deliberately private; see the module docs above).
 fn tmux_bin() -> &'static str {
     static BIN: OnceLock<String> = OnceLock::new();
     BIN.get_or_init(|| {
+        if let Ok(p) = std::env::var("EVY_TMUX_BIN") {
+            if !p.is_empty() {
+                return p;
+            }
+        }
         let mut candidates: Vec<PathBuf> = std::env::var_os("PATH")
             .map(|path| {
                 std::env::split_paths(&path)
