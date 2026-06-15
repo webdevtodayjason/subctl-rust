@@ -353,27 +353,6 @@ impl TelegramBridge {
         }
     }
 
-    /// Send a voice note via Telegram's `sendVoice` API.
-    ///
-    /// **CHECKPOINT — not yet wired**: this method requires the
-    /// `reqwest/multipart` feature to build a multipart form upload.
-    /// Until that feature is added to `evy-comms`, this always returns
-    /// an `Err` with a clear description so callers can surface the gap.
-    ///
-    /// When `evy-comms` gains `multipart`, replace the body with:
-    /// 1. `creds_snapshot()` to get the bot token and chat id.
-    /// 2. `reqwest::multipart::Form` carrying the audio bytes as `voice`.
-    /// 3. POST to `{base_url}/bot{token}/sendVoice`.
-    pub async fn send_voice(&self, _audio_bytes: &[u8], _caption: Option<&str>) -> Result<()> {
-        // TODO: add reqwest/multipart to evy-comms [dependencies] and
-        // implement the multipart upload to sendVoice to complete this.
-        Err(Error::Provider {
-            kind: ProviderKind::ClaudeCode,
-            reason: "telegram: send_voice not yet wired — add reqwest/multipart to evy-comms"
-                .to_string(),
-        })
-    }
-
     // ─── internals ──────────────────────────────────────────────────
 
     async fn send_message(&self, text: &str) -> Result<SendMessageResult> {

@@ -1672,8 +1672,9 @@ impl EvyTool for TelegramSendVoiceTool {
         // [comms.telegram]) but multipart sendVoice is not yet wired.
         // To complete:
         //   1. Add `multipart` to reqwest features in evy-comms/Cargo.toml.
-        //   2. Call bridge.send_voice(audio_bytes, caption) once evy-voice
-        //      TTS bytes are available.
+        //   2. Add a `TelegramBridge::send_voice(audio_bytes, caption)`
+        //      that POSTs a multipart form to `{base_url}/bot{token}/sendVoice`,
+        //      and call it here once evy-voice TTS bytes are available.
         let creds_present = self.telegram.is_some();
         Err(format!(
             "telegram_send_voice not yet wired — add reqwest/multipart to evy-comms to enable \
