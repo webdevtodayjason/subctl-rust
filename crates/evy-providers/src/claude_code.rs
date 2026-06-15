@@ -662,7 +662,6 @@ pub(crate) fn provision_directive_key(dir: &Path, key: &HmacKey) -> Result<()> {
 /// assignment followed by the `claude` binary invoked by ABSOLUTE path
 /// (never `command claude`), so the spawned worker resolves the same
 /// native binary regardless of the tmux/launchd PATH.
-
 fn build_launch_line(claude_config_dir: &Path, claude_bin: &Path) -> Result<String> {
     let config_dir = path_to_arg(claude_config_dir)?;
     let claude_bin = path_to_arg(claude_bin)?;

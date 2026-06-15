@@ -47,7 +47,10 @@ pub mod retrieval;
 pub mod scoring;
 
 pub use claude_mem::{ClaudeMemReader, Episode};
-pub use cognee::{CogneeClient, CogneeConfig, CogneeMatch};
+pub use cognee::{
+    CogneeClient, CogneeConfig, CogneeMatch, CogneeNeighborsResult, CogneePathResult,
+    CogneeQueryResult,
+};
 pub use feedback::{Feedback, FeedbackContext, FeedbackIngest, FeedbackKind};
 pub use observation::{Observation, ObservationKind};
 pub use observation_log::ObservationLog;

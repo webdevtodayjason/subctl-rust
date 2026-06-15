@@ -80,6 +80,8 @@ async fn phase1_smoke_test_runs_cron_job_and_exits_clean() -> anyhow::Result<()>
         memory: MemoryConfig::default(),
         skills: SkillsConfig::default(),
         thinking_partner: None,
+        cognee: evy::config::CogneeServiceConfig::default(),
+        context7: evy::config::Context7Config::default(),
     };
 
     let report = run_smoke_test(config).await?;

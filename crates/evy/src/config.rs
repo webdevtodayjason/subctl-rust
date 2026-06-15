@@ -74,6 +74,17 @@ pub struct Config {
     /// `POST /api/evy/chat` endpoint then returns 503. Phase 6.
     #[serde(default)]
     pub thinking_partner: Option<ThinkingPartnerSectionConfig>,
+    /// EA2 — `[cognee]` table. Configures the local Cognee graph
+    /// service for the `knowledge_graph_*` agency tools. Defaulted so
+    /// an operator without Cognee still boots; the tools degrade
+    /// gracefully when unreachable.
+    #[serde(default)]
+    pub cognee: CogneeServiceConfig,
+    /// EA2 — `[context7]` table. Configures the Context7 MCP HTTP
+    /// gateway for the `context7_*` agency tools. Defaulted; the tools
+    /// surface a clear error when `CONTEXT7_API_KEY` is absent.
+    #[serde(default)]
+    pub context7: Context7Config,
 }
 
 /// `[scheduler]` table.
@@ -531,6 +542,100 @@ fn default_accounts_conf_path() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/"));
     home.join(".config").join("subctl").join("accounts.conf")
+}
+
+// ─── EA2 — cognee + context7 ─────────────────────────────────────────
+
+/// `[cognee]` table — configures the local Cognee HTTP service used by
+/// the `knowledge_graph_*` agency tools.
+///
+/// All fields default so an operator who doesn't run Cognee can still
+/// boot the daemon; the knowledge-graph tools degrade gracefully with a
+/// clear error string when the service is unreachable.
+#[derive(Clone, Deserialize, Serialize)]
+pub struct CogneeServiceConfig {
+    /// Base URL of the local Cognee HTTP service.
+    /// Default `http://127.0.0.1:8745` (matches v3 default).
+    #[serde(default = "default_cognee_endpoint")]
+    pub endpoint: String,
+    /// Optional Bearer token for the Cognee service. Never logged.
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Per-request timeout in seconds. Default 15.
+    #[serde(default = "default_cognee_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+impl std::fmt::Debug for CogneeServiceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CogneeServiceConfig")
+            .field("endpoint", &self.endpoint)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
+}
+
+impl Default for CogneeServiceConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: default_cognee_endpoint(),
+            api_key: None,
+            timeout_secs: default_cognee_timeout_secs(),
+        }
+    }
+}
+
+fn default_cognee_endpoint() -> String {
+    "http://127.0.0.1:8745".to_string()
+}
+
+const fn default_cognee_timeout_secs() -> u64 {
+    15
+}
+
+/// `[context7]` table — configures the Context7 MCP HTTP gateway used
+/// by the `context7_*` agency tools. The API key is resolved via the
+/// `evy-secrets` chain at runtime (not stored here); this section
+/// carries only the endpoint and request timeout.
+///
+/// Defaulted so an operator who doesn't use Context7 can still boot.
+/// The tools surface a clear error if the key is absent.
+#[derive(Clone, Deserialize, Serialize)]
+pub struct Context7Config {
+    /// Context7 MCP endpoint. Default `https://mcp.context7.com/mcp`.
+    #[serde(default = "default_context7_endpoint")]
+    pub endpoint: String,
+    /// Per-request timeout in seconds. Default 15.
+    #[serde(default = "default_context7_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+impl std::fmt::Debug for Context7Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Context7Config")
+            .field("endpoint", &self.endpoint)
+            .field("timeout_secs", &self.timeout_secs)
+            .field("api_key", &"[resolved-at-runtime]")
+            .finish()
+    }
+}
+
+impl Default for Context7Config {
+    fn default() -> Self {
+        Self {
+            endpoint: default_context7_endpoint(),
+            timeout_secs: default_context7_timeout_secs(),
+        }
+    }
+}
+
+fn default_context7_endpoint() -> String {
+    "https://mcp.context7.com/mcp".to_string()
+}
+
+const fn default_context7_timeout_secs() -> u64 {
+    15
 }
 
 impl Config {
