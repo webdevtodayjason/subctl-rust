@@ -232,3 +232,46 @@ Contract: ① backend-neutral tool registry extending anthropic.rs skill_view lo
 | EA1-C | wave close: live chat proofs, dispatch-through-chat, codex re-proof, deploy | DONE (orchestrator) — see WAVE EA1 CLOSED | team-lead | — | 2026-06-12T02:00Z |
 **Census:** 6 rows amended (20, 32, 42, 55, 77, preferences.ts tool row). **Closet net:** 6 ticked done, 9 added-owned. Workers: 3 Fable, all first-pass mergeable, protocol shutdowns clean; +1 micro-slice rider (w6-restore) verified+merged. **NEXT:** proposed W6.5 spawn-integrity mini-wave (mandate delivery both providers + watchdog-frame bus regression + #420 stamp scoping + #425 notify-listener; #422 -o preamble = operator decision pending) BEFORE the Evy-agency wave — agency dispatch tools must not build on a spawn path that drops directives.
 
+## Wave EA2 — EVY-AGENCY 2: RESEARCH + KNOWLEDGE + INTEGRATIONS (locked contract via /goal, operator 2026-06-15)
+
+Contract: port ~26 v3 agency tools natively into v4 (web/tinyfish incl. browser-automation, knowledge, knowledge-graph, context7, gh reads, linear read+write, telegram send/digest[+voice if creds]). Each tool: registered in `build_tool_registry()`, callable via the anthropic loop, unit-tested (agency.rs) + wiremock round-trip (tool_loop_mock.rs). Pinned `~/.cargo/bin/cargo fmt --all --check && clippy -D warnings && test --workspace` green per merge + at close. No-fallback proof + live conversion act (one tool/slice, operator-confirmed real). Census Class-2 rows absent→native. NON-GOALS: memory family (blocked on store-ownership ruling), Brave/Firecrawl (dropped — consolidate on TinyFish), new crates beyond evy-research, tool-loop/error-path/audit-funnel rewrites, v3/M3 changes. Base = d81262b.
+
+### EA2 recon table (orchestrator, 2026-06-15, live-verified against the v4 tree)
+
+| Tool group | v3 source | v4 owner | R/W | Status from recon |
+|---|---|---|---|---|
+| tinyfish_search, tinyfish_fetch, web_search, web_fetch | tinyfish.ts, web.ts | `evy-research` (ResearchClient::search/fetch_content — TinyFishClient EXISTS) | read | ✅ wire 4 onto existing crate; web_fetch parity confirmed (markdown) |
+| tinyfish_agent, tinyfish_agent_async | tinyfish.ts | `evy-research` — NEW automation.rs (run_web_automation, sync+async poll, retry-rule) | read | ➕ operator-approved crate extension (Worker A) |
+| knowledge_graph_neighbors/_path/_query | knowledge-graph.ts | reuse `evy-memory::cognee` client | read | ✅ query path only — NOT the blocked evy.db store |
+| system_subctl_knowledge | knowledge.ts | native + NEW v4 knowledge asset | read | ➕ new asset (Worker B) |
+| context7_resolve/_docs/_health | context7.ts | NEW Context7 client | read | ➕ new client; CONTEXT7_API_KEY via evy-secrets |
+| gh_pr_list/_view/_checks, gh_issue_list | gh.ts | `gh` CLI shell-out (abs-path resolver) | read | ➕ new shell-out |
+| linear_list_issues/_search/_create_issue/_update_issue | linear.ts | NEW Linear GraphQL client | read+**write** | ➕ writes wiremock-only until live conv act |
+| telegram_send, telegram_send_digest | telegram.ts | `evy-comms::TelegramBridge` (POST /api/evy/notify, native) | **write** | ✅ near-free |
+| telegram_send_voice | telegram.ts | direct voice creds | **write** | ⏸ CHECKPOINT — ship rest if absent |
+| token loading (all keyed) | — | `evy-secrets::SecretsResolver` | — | ✅ standard path |
+
+### EA2 task ledger (team ea2-agency, 3 Fable workers, worktree-isolated, dispatched 2026-06-15)
+
+| ID | Task | State | Worker | Branch / worktree | Started |
+|----|------|-------|--------|--------|---------|
+| EA2-A | research: tinyfish + web (4 tools) + evy-research automation backend (2 tools) | OPUS-DONE, orch-verifying — commit 48f84c8; reports 1224 passed/0 failed; HYGIENE: removed unused evy-secrets dep (Sonnet scope-creep), fixed misleading secrets docs, added the missing tool_loop_mock round-trips, retry-rule proven (POST hit exactly once, recovers via poll). ORCH-VERIFIED GREEN (independent gate exit 0: fmt+clippy clean, all suites ok / 0 failed). | wa-research→opus | feat/ea2-research @ ../ea2-research | 2026-06-15 |
+| EA2-B | knowledge + knowledge-graph (reuse cognee) + context7 (7 read tools) | OPUS-DONE, orch-verifying — commit d1907bf, reports 1206/0. Opus caught+fixed a REAL PANIC: context7 key resolution used block_in_place+Handle::block_on → panics on current-thread runtime → all 5 context7 tools would crash; made async. Sonnet had written ZERO knowledge tests; Opus wrote 13. Knowledge asset = `include_str!` of crates/evy/knowledge/subctl.toon (247 lines, OnceLock). Orch gate running. NOTE (future wave): cognee health probed per-call, no 30s TTL cache like v3 — defensible. | wa-knowledge→opus | feat/ea2-knowledge @ ../ea2-knowledge | 2026-06-15 |
+| EA2-C | gh reads + linear r+w + telegram send/digest/voice (11 tools) | OPUS-DONE, orch-verifying — commits 4b196c3+b3a3f7d; 11 tools registered, 18 EA2 tests; Opus caught+fixed a FALSE clippy-green from the Sonnet pass (claude_code.rs:665 empty-line-after-doc); voice STUBBED (checkpoint: needs reqwest/multipart on evy-comms + a voice bot token — text+digest shipped). Opus AMENDED to 7bda685 (reverted 2 out-of-scope Sonnet edits: orphaned telegram send_voice stub + claude_code.rs cosmetic; reports 1211/0). ⚠ MERGE-RECONCILE: integrations reverted claude_code.rs to baseline calling it NOT-required, but research+knowledge BOTH keep a claude_code.rs blank-line removal calling it clippy-REQUIRED — authoritative post-merge clippy decides. Orch re-verifying 7bda685 (prior b3a3f7d verification now stale). | wa-integrations→opus | feat/ea2-integrations @ ../ea2-integrations | 2026-06-15 |
+
+**Riders (orchestrator-owned, at integration):** R1 = add `evy_tool_audit` target to the prod tracing filter (else new tools' audit lines vanish — contract acceptance). R2 (low) = gemma `<|channel>thought` strip in lm_studio.rs. R3 (low) = usage live-refresh.
+
+**Merge order:** A→B→C, full pinned gate after each. Shared files (agency.rs, lib.rs, config.rs) are append-only per worker; conflicts resolved at merge.
+
+**MERGE PHASE (orchestrator, 2026-06-15):**
+- Orch independent re-verify of all 3: A `48f84c8` GREEN, B `d1907bf` GREEN. C `7bda685` **FAILED clippy** on my clean run — `empty_line_after_doc_comments` at claude_code.rs:664 (a PRE-EXISTING baseline lint; research+knowledge boy-scout-removed it, integrations-Opus wrongly reverted it; its "clippy PASS" was incrementally cached = false green, caught by independent verification). Merge auto-resolves: research/knowledge remove the line, integrations leaves baseline → 3-way merge keeps removal, no conflict → merged tree clippy-clean.
+- A fast-forward merged → main `48f84c8`. B preview = 6 keep-both conflicts (agency.rs, config.rs, lib.rs, 3 test fixtures). Dispatched ONE Opus integrator to union-merge B+C into main, regen Cargo.lock, green the full gate. Expected merged registry = EA1 8 + EA2 (6+7+11) = 32 tools.
+
+## Decision Log — EA2
+
+- **2026-06-15** — Scope = full agency set incl. writes (operator); memory family held out (blocked on store-ownership ruling). Rationale: reads+writes both wanted now; memory needs the evy.db-vs-claude-mem ruling first.
+- **2026-06-15** — Web substrate = consolidate on TinyFish via evy-research; drop Brave/Firecrawl (operator). Rationale: one web code path, one cred set; evy-research already covers search+fetch.
+- **2026-06-15** — tinyfish_agent/_async = extend evy-research with an automation backend THIS wave (operator, tripwire resolution). Rationale: keep full parity; within the contract's "evy-research crate (Worker A)" budget clause. MUST honor the TinyFish retry rule (error ≠ failure; poll status, never blind-retry).
+- **2026-06-15** — INCIDENT: the 3 iTerm2-pane team workers (wa-research/knowledge/integrations) spawned but never executed — worktrees stayed pristine, task list empty, processes parked at 0% CPU, no replies to status pings. Plain background Agents DO run in this session (proven by the recon agents). RECOVERY (operator): killed the 3 stalled pane hosts, re-dispatched the same 3 briefs as plain background Agents into the same worktrees. Report-back changes from SendMessage → the agent's final return message. Lesson: verify worktree ground-truth right after dispatch, never trust "spawned" as "working." ROOT CAUSE (confirmed on re-dispatch): workers were spawned on model=fable and Claude Fable 5 is currently UNAVAILABLE — pane hosts parked silently at 0% CPU; background agents failed fast with the explicit "Fable 5 unavailable" error. Re-dispatched on model=sonnet (forced substitution — contract said "Fable workers" but Fable is down).
+- **2026-06-15** — Fable outage is a US-gov export-control directive (2026-06-12), not transient. Operator directive: workers = **Opus 4.8**. By the time Sonnet was overridden, the 3 Sonnet agents had near/fully completed on-spec work (6+7+10 tools, new automation.rs / knowledge asset / agency_ea2.rs) but UNCOMMITTED + unverified, each rippling into shared test fixtures + claude_code.rs (expected AgencyDeps-constructor fixup). Operator chose: KEEP the Sonnet work, put one OPUS agent per worktree to run the pinned gate, fix failures, scrutinize the ripple, and commit. Opus owns the final verified+committed result; avoids ~3× Opus spend redoing done work.
+
