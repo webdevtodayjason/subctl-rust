@@ -158,6 +158,7 @@ async fn daemon_boots_with_codex_thinking_partner() -> Result<()> {
                 endpoint: None,
             }),
         }),
+        agency: evy::config::AgencyConfig::default(),
     };
 
     let shutdown = CancellationToken::new();
@@ -251,6 +252,7 @@ async fn daemon_fails_fast_when_codex_section_missing() -> Result<()> {
             // turn or unwrap()'ing inside the backend constructor.
             codex: None,
         }),
+        agency: evy::config::AgencyConfig::default(),
     };
 
     let shutdown = CancellationToken::new();

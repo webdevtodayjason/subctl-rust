@@ -74,6 +74,11 @@ pub struct Config {
     /// `POST /api/evy/chat` endpoint then returns 503. Phase 6.
     #[serde(default)]
     pub thinking_partner: Option<ThinkingPartnerSectionConfig>,
+    /// EA2 — agency integration configuration (gh CLI, Linear GraphQL).
+    /// Fully defaulted so existing operator configs that omit `[agency]`
+    /// continue to boot without changes.
+    #[serde(default)]
+    pub agency: AgencyConfig,
 }
 
 /// `[scheduler]` table.
@@ -531,6 +536,109 @@ fn default_accounts_conf_path() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/"));
     home.join(".config").join("subctl").join("accounts.conf")
+}
+
+// ─── EA2 — agency integrations ────────────────────────────────────────────
+
+/// `[agency]` table — EA2 integration config.
+///
+/// Both subsections are fully defaulted so an operator who omits
+/// `[agency]` from their TOML gets sensible out-of-the-box behaviour
+/// (binary search for `gh`, `LINEAR_API_KEY` env var).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct AgencyConfig {
+    /// `[agency.gh]` — gh CLI binary resolution.
+    #[serde(default)]
+    pub gh: GhSectionConfig,
+    /// `[agency.linear]` — Linear GraphQL API.
+    #[serde(default)]
+    pub linear: LinearSectionConfig,
+}
+
+/// `[agency.gh]` — gh binary resolution for launchd environments.
+///
+/// launchd starts the daemon with a bare PATH that often omits
+/// Homebrew's prefix, so the path to `gh` must be resolved at config
+/// time rather than relying on `$PATH`. Resolution order:
+///
+/// 1. `GH_BIN` environment variable (set by the operator in the
+///    launchd plist or shell profile).
+/// 2. `~/.local/bin/gh`
+/// 3. `/opt/homebrew/bin/gh`
+/// 4. `/usr/local/bin/gh`
+/// 5. Bare `gh` (last resort — works if the daemon's PATH is set).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GhSectionConfig {
+    /// Absolute path to the `gh` binary.
+    ///
+    /// Defaults via [`default_gh_bin`] which walks the candidate list
+    /// above. Override to pin a specific binary independent of PATH.
+    #[serde(default = "default_gh_bin")]
+    pub gh_bin: PathBuf,
+}
+
+impl Default for GhSectionConfig {
+    fn default() -> Self {
+        Self {
+            gh_bin: default_gh_bin(),
+        }
+    }
+}
+
+/// Resolve the `gh` binary path at config-load time.
+fn default_gh_bin() -> PathBuf {
+    if let Ok(v) = std::env::var("GH_BIN") {
+        return PathBuf::from(v);
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    for candidate in &[
+        format!("{home}/.local/bin/gh"),
+        "/opt/homebrew/bin/gh".to_string(),
+        "/usr/local/bin/gh".to_string(),
+    ] {
+        let p = PathBuf::from(candidate);
+        if p.exists() {
+            return p;
+        }
+    }
+    PathBuf::from("gh")
+}
+
+/// `[agency.linear]` — Linear GraphQL API configuration.
+///
+/// The API key is resolved at execute-time through the evy-secrets
+/// chain (env → file) so it never appears in operator config TOML.
+/// This section only controls _how_ the chain is built.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LinearSectionConfig {
+    /// Environment variable holding the Linear API key.
+    ///
+    /// Default `LINEAR_API_KEY`. The env backend normalises this to
+    /// uppercase with dashes replaced by underscores, so `linear_api_key`
+    /// as a lookup key maps to `LINEAR_API_KEY` in the process env.
+    #[serde(default = "default_linear_api_key_env")]
+    pub api_key_env: String,
+    /// Optional file path for a JSON secrets file consulted after the
+    /// env backend.
+    ///
+    /// Default `~/.config/subctl/secrets.json`. Set this to point at a
+    /// different file (e.g. a 1Password JSON export) or leave absent to
+    /// use the default path.
+    #[serde(default)]
+    pub secrets_file: Option<PathBuf>,
+}
+
+impl Default for LinearSectionConfig {
+    fn default() -> Self {
+        Self {
+            api_key_env: default_linear_api_key_env(),
+            secrets_file: None,
+        }
+    }
+}
+
+fn default_linear_api_key_env() -> String {
+    "LINEAR_API_KEY".to_string()
 }
 
 impl Config {

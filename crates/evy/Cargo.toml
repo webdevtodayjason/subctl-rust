@@ -61,6 +61,15 @@ chrono = { version = "0.4", features = ["serde"] }
 # worker ids back into `WorkerId(Uuid)`. Promoted from dev-dependencies.
 uuid = { workspace = true }
 
+# EA2 — agency tools: Linear GraphQL HTTP client + secrets resolver.
+# reqwest: same feature set as evy-comms (json + rustls-tls); no stream
+# feature needed here (no SSE in the agency HTTP path).
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+evy-secrets = { workspace = true }
+
 [dev-dependencies]
 # ── Phase 2 Slice 2D — cutover testing ───────────────────────────────────
 # These dev-deps power the `tests/cutover/` harness. Each version pin
