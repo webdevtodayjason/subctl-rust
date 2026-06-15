@@ -86,3 +86,9 @@ tracing-subscriber = { workspace = true }
 # `SkillRegistry` for the "empty registry must not advertise the tool"
 # guard. Matches the version evy-skills already uses.
 tempfile = "3"
+# EA2 — drive the real TinyFish research client (pointed at a wiremock
+# server) through the tool loop in `tool_loop_mock.rs`, proving the
+# end-to-end round-trip: LLM tool_use -> tool hits TinyFish over HTTP ->
+# result echoed back. Test-only edge; evy-research is a leaf crate so
+# this introduces no production coupling or dependency cycle.
+evy-research = { workspace = true }

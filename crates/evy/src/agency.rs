@@ -48,6 +48,8 @@ use evy_comms::{
 use evy_core::{WorkerId, WorkerRegistry};
 use evy_policy::{Mode, Policy};
 use evy_providers::AccountsStore;
+use evy_research::automation::{AutomationClient, AutomationRequest};
+use evy_research::ResearchClient;
 use evy_thinking::{EvyTool, LiveStatusSource, ToolRegistry, ToolSpec};
 use evy_watchdog::TmuxQuery;
 use serde::Deserialize;
@@ -751,6 +753,13 @@ pub struct AgencyDeps {
     pub accounts_conf: PathBuf,
     /// `usage-snapshots.jsonl` path.
     pub snapshots: PathBuf,
+    // ── EA2 ──────────────────────────────────────────────────────────
+    /// TinyFish search + fetch client (EA2). `None` = API key not
+    /// configured; tools surface a structured error rather than panicking.
+    pub research: Option<Arc<dyn ResearchClient>>,
+    /// TinyFish browser-automation client (EA2). `None` = API key not
+    /// configured; automation tools surface a structured error.
+    pub automation: Option<Arc<AutomationClient>>,
 }
 
 /// Build the full EA1 tool registry: five read-only tools, three
@@ -787,6 +796,451 @@ pub fn build_tool_registry(deps: &AgencyDeps) -> ToolRegistry {
         .with_tool(Arc::new(NotifyOperatorTool {
             telegram: deps.telegram.clone(),
         }))
+        // ── EA2 — web-research tools ─────────────────────────────────
+        .with_tool(Arc::new(TinyfishSearchTool {
+            client: deps.research.clone(),
+        }))
+        .with_tool(Arc::new(TinyfishFetchTool {
+            client: deps.research.clone(),
+        }))
+        .with_tool(Arc::new(WebSearchTool {
+            client: deps.research.clone(),
+        }))
+        .with_tool(Arc::new(WebFetchTool {
+            client: deps.research.clone(),
+        }))
+        .with_tool(Arc::new(TinyfishAgentTool {
+            client: deps.automation.clone(),
+        }))
+        .with_tool(Arc::new(TinyfishAgentAsyncTool {
+            client: deps.automation.clone(),
+        }))
+}
+
+// ─── EA2 — web-research tools ────────────────────────────────────────────
+//
+// Four search/fetch tools (tinyfish_search, tinyfish_fetch, web_search,
+// web_fetch) delegate to an Arc<dyn ResearchClient>.  Two automation tools
+// (tinyfish_agent, tinyfish_agent_async) delegate to an Arc<AutomationClient>.
+//
+// Tool names, descriptions, and input schemas are canonical copies of
+// v3's components/evy/tools/tinyfish.ts and web.ts.
+
+/// Helper: extract a non-empty string field from tool input.
+fn required_str<'a>(input: &'a Value, field: &str) -> std::result::Result<&'a str, String> {
+    input
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| format!("`{field}` is required and must be a non-empty string"))
+}
+
+/// Serialize a list of [`evy_research::SearchResult`] rows into a compact
+/// JSON string that fits in a tool-result payload.
+fn format_search_results(query: &str, results: &[evy_research::SearchResult]) -> String {
+    serde_json::json!({
+        "ok": true,
+        "query": query,
+        "count_returned": results.len(),
+        "results": results.iter().map(|r| serde_json::json!({
+            "title": r.title,
+            "url": r.url,
+            "snippet": r.snippet,
+            "source_tier": format!("{:?}", r.source_tier),
+        })).collect::<Vec<_>>(),
+    })
+    .to_string()
+}
+
+/// Serialize a [`evy_research::FetchResult`] into a tool-result payload.
+fn format_fetch_result(res: &evy_research::FetchResult) -> String {
+    serde_json::json!({
+        "ok": true,
+        "url": res.url,
+        "title": res.title,
+        "format": res.content_type,
+        "markdown": res.content,
+        "markdown_length": res.content.len(),
+    })
+    .to_string()
+}
+
+// ─── tinyfish_search ─────────────────────────────────────────────────────
+
+/// `tinyfish_search` — live web search via TinyFish (free tier, no credits).
+pub struct TinyfishSearchTool {
+    client: Option<Arc<dyn ResearchClient>>,
+}
+
+#[async_trait]
+impl EvyTool for TinyfishSearchTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "tinyfish_search".into(),
+            description: "**Use this when** you need to query the live web for current information \
+                          — news, prices, recent events, anything that changes over time. Returns \
+                          structured agent-ready results (title + URL + snippet). Free tier, no \
+                          credits. Parallel to web_search; try TinyFish first for current-events \
+                          queries (different index + freshness), fall back to web_search if results \
+                          are sparse. Requires `tinyfish_api_key` configured on the daemon."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Max results to return (default 10, max 20)",
+                        "minimum": 1,
+                        "maximum": 20
+                    }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    async fn execute(&self, input: &Value) -> std::result::Result<String, String> {
+        let query = required_str(input, "query")?;
+        let max = input
+            .get("max_results")
+            .and_then(Value::as_u64)
+            .map(|n| n.clamp(1, 20) as usize)
+            .unwrap_or(10);
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| "tinyfish_api_key not configured on this daemon".to_string())?;
+        let results = client.search(query, max).await.map_err(|e| e.to_string())?;
+        Ok(format_search_results(query, &results))
+    }
+}
+
+// ─── tinyfish_fetch ──────────────────────────────────────────────────────
+
+/// `tinyfish_fetch` — full-page content extraction via TinyFish (free tier).
+pub struct TinyfishFetchTool {
+    client: Option<Arc<dyn ResearchClient>>,
+}
+
+#[async_trait]
+impl EvyTool for TinyfishFetchTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "tinyfish_fetch".into(),
+            description: "**Use this when** you need the full text of a specific URL — articles, \
+                          docs, product pages, anything you need to reason over. Returns clean \
+                          extracted text (markdown by default). Free tier, no credits. Parallel to \
+                          web_fetch; try TinyFish first for cleaner extraction with metadata \
+                          (title, author, published_date), fall back to web_fetch if needed. \
+                          Requires `tinyfish_api_key` configured on the daemon."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "The URL to fetch (http/https only)"}
+                },
+                "required": ["url"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    async fn execute(&self, input: &Value) -> std::result::Result<String, String> {
+        let url = required_str(input, "url")?;
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| "tinyfish_api_key not configured on this daemon".to_string())?;
+        let result = client.fetch_content(url).await.map_err(|e| e.to_string())?;
+        Ok(format_fetch_result(&result))
+    }
+}
+
+// ─── web_search ──────────────────────────────────────────────────────────
+
+/// `web_search` — live web search (thin alias over `tinyfish_search`).
+///
+/// In v3 this backed onto Brave Search; in v4 Brave is dropped and
+/// TinyFish is the sole search backend. The tool name, description, and
+/// input schema are preserved so any prompt or skill that references
+/// `web_search` continues to work without modification.
+pub struct WebSearchTool {
+    client: Option<Arc<dyn ResearchClient>>,
+}
+
+#[async_trait]
+impl EvyTool for WebSearchTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "web_search".into(),
+            description: "Search the web for current information. Returns top results with title \
+                          + URL + snippet. Useful for current docs, news, API references, or \
+                          verifying claims that may have changed since the model was trained. \
+                          Backed by TinyFish (v4; v3 used Brave). Requires `tinyfish_api_key` \
+                          configured on the daemon."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                    "count": {
+                        "type": "integer",
+                        "description": "Number of results to return (default 10, max 20)",
+                        "minimum": 1,
+                        "maximum": 20
+                    }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    async fn execute(&self, input: &Value) -> std::result::Result<String, String> {
+        let query = required_str(input, "query")?;
+        let max = input
+            .get("count")
+            .and_then(Value::as_u64)
+            .map(|n| n.clamp(1, 20) as usize)
+            .unwrap_or(10);
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| "tinyfish_api_key not configured on this daemon".to_string())?;
+        let results = client.search(query, max).await.map_err(|e| e.to_string())?;
+        Ok(format_search_results(query, &results))
+    }
+}
+
+// ─── web_fetch ───────────────────────────────────────────────────────────
+
+/// `web_fetch` — URL → clean markdown (thin alias over `tinyfish_fetch`).
+///
+/// In v3 this backed onto Firecrawl; in v4 Firecrawl is dropped and
+/// TinyFish is the sole fetch backend. Tool name + schema preserved for
+/// v3 compatibility.
+pub struct WebFetchTool {
+    client: Option<Arc<dyn ResearchClient>>,
+}
+
+#[async_trait]
+impl EvyTool for WebFetchTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "web_fetch".into(),
+            description: "Fetch a URL and convert to clean markdown. Use when you need to read a \
+                          specific page's content (docs, articles, GitHub READMEs, API references). \
+                          Backed by TinyFish (v4; v3 used Firecrawl). Requires `tinyfish_api_key` \
+                          configured on the daemon."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "The URL to fetch (http/https only)"}
+                },
+                "required": ["url"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    async fn execute(&self, input: &Value) -> std::result::Result<String, String> {
+        let url = required_str(input, "url")?;
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| "tinyfish_api_key not configured on this daemon".to_string())?;
+        let result = client.fetch_content(url).await.map_err(|e| e.to_string())?;
+        Ok(format_fetch_result(&result))
+    }
+}
+
+// ─── tinyfish_agent ──────────────────────────────────────────────────────
+
+/// `tinyfish_agent` — run a browser automation agent and wait for it to
+/// complete (sync path). Consumes TinyFish credits.
+pub struct TinyfishAgentTool {
+    client: Option<Arc<AutomationClient>>,
+}
+
+#[async_trait]
+impl EvyTool for TinyfishAgentTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "tinyfish_agent".into(),
+            description: "**Use this when** you need a hosted browser to actually *do something* \
+                          on a page — fill a form, click through a multi-step flow, scrape dynamic \
+                          content that requires interaction, run a natural-language workflow on a \
+                          real site. TinyFish operates the browser on their cloud, executes your \
+                          `task` starting from `starting_url`, and returns the extracted result + \
+                          run metadata. For pure read/search use `tinyfish_search` or \
+                          `tinyfish_fetch` instead — those are free; this consumes TinyFish \
+                          credits. 5xx errors trigger poll-not-retry (run may already be live); \
+                          4xx surfaces immediately."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "Natural-language description of what the agent should do."
+                    },
+                    "starting_url": {
+                        "type": "string",
+                        "description": "Target URL the agent starts from (http/https only). REQUIRED."
+                    },
+                    "timeout_seconds": {
+                        "type": "number",
+                        "description": "Max seconds the agent may spend (1–600, default 120).",
+                        "minimum": 1,
+                        "maximum": 600
+                    },
+                    "max_steps": {
+                        "type": "integer",
+                        "description": "Optional cap on agent steps (1–500).",
+                        "minimum": 1,
+                        "maximum": 500
+                    },
+                    "browser_profile": {
+                        "type": "string",
+                        "enum": ["lite", "stealth"],
+                        "description": "'lite' (default, faster) or 'stealth' (anti-bot)."
+                    }
+                },
+                "required": ["task", "starting_url"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    async fn execute(&self, input: &Value) -> std::result::Result<String, String> {
+        let task = required_str(input, "task")?;
+        let starting_url = required_str(input, "starting_url")?;
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| "tinyfish_api_key not configured on this daemon".to_string())?;
+        let mut req = AutomationRequest::new(task, starting_url);
+        if let Some(secs) = input.get("timeout_seconds").and_then(Value::as_f64) {
+            req.max_duration_seconds = (secs.clamp(1.0, 600.0) as u32).max(1);
+        }
+        if let Some(steps) = input.get("max_steps").and_then(Value::as_u64) {
+            req.max_steps = Some(steps.clamp(1, 500) as u32);
+        }
+        if let Some(profile) = input.get("browser_profile").and_then(Value::as_str) {
+            req.browser_profile = Some(profile.to_string());
+        }
+        let result = client.run_sync(&req).await.map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({
+            "ok": result.status == "COMPLETED",
+            "run_id": result.run_id,
+            "status": result.status,
+            "started_at": result.started_at,
+            "finished_at": result.finished_at,
+            "num_of_steps": result.num_of_steps,
+            "result": result.result,
+            "error": result.error,
+        })
+        .to_string())
+    }
+}
+
+// ─── tinyfish_agent_async ─────────────────────────────────────────────────
+
+/// `tinyfish_agent_async` — start a browser automation run and return
+/// immediately with a `run_id`; the caller can poll later via
+/// `AutomationClient::poll_run`.
+pub struct TinyfishAgentAsyncTool {
+    client: Option<Arc<AutomationClient>>,
+}
+
+#[async_trait]
+impl EvyTool for TinyfishAgentAsyncTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "tinyfish_agent_async".into(),
+            description: "**Use this when** you'd otherwise call `tinyfish_agent` but the task \
+                          is likely to take more than ~15s and the operator wants to keep talking \
+                          while it runs. Returns immediately with a `run_id`; poll the run status \
+                          to get the result. Same arguments as `tinyfish_agent`. Note: run \
+                          terminates if the daemon is restarted before it completes."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "Natural-language goal description (same as tinyfish_agent)."
+                    },
+                    "starting_url": {
+                        "type": "string",
+                        "description": "Target URL the agent starts from (same as tinyfish_agent)."
+                    },
+                    "timeout_seconds": {
+                        "type": "number",
+                        "description": "Max seconds the agent may spend (1–600, default 120).",
+                        "minimum": 1,
+                        "maximum": 600
+                    },
+                    "max_steps": {
+                        "type": "integer",
+                        "description": "Optional cap on agent steps (1–500).",
+                        "minimum": 1,
+                        "maximum": 500
+                    },
+                    "browser_profile": {
+                        "type": "string",
+                        "enum": ["lite", "stealth"],
+                        "description": "'lite' (default) or 'stealth'."
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "Optional short label to identify this run."
+                    }
+                },
+                "required": ["task", "starting_url"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    async fn execute(&self, input: &Value) -> std::result::Result<String, String> {
+        let task = required_str(input, "task")?;
+        let starting_url = required_str(input, "starting_url")?;
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| "tinyfish_api_key not configured on this daemon".to_string())?;
+        let mut req = AutomationRequest::new(task, starting_url);
+        if let Some(secs) = input.get("timeout_seconds").and_then(Value::as_f64) {
+            req.max_duration_seconds = (secs.clamp(1.0, 600.0) as u32).max(1);
+        }
+        if let Some(steps) = input.get("max_steps").and_then(Value::as_u64) {
+            req.max_steps = Some(steps.clamp(1, 500) as u32);
+        }
+        if let Some(profile) = input.get("browser_profile").and_then(Value::as_str) {
+            req.browser_profile = Some(profile.to_string());
+        }
+        let label = input
+            .get("label")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let evy_research::automation::AsyncRunId(run_id) =
+            client.run_async(&req).await.map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({
+            "ok": true,
+            "run_id": run_id,
+            "status": "started",
+            "tool_name": "tinyfish_agent",
+            "label": label,
+            "note": "Result will be available via poll once the run completes.",
+        })
+        .to_string())
+    }
 }
 
 /// Build the [`LiveStatus`] source over the same handles.
@@ -1025,17 +1479,20 @@ codex-c | openai-codex | c@x.com | /tmp/codex-c | codex box
             telegram: None,
             accounts_conf,
             snapshots,
+            research: None,
+            automation: None,
         }
     }
 
     #[tokio::test]
-    async fn registry_carries_all_eight_tools() {
+    async fn registry_carries_all_fourteen_tools() {
         let (_d1, accounts) = write_temp(ACCOUNTS, "accounts.conf");
         let (_d2, snaps) = write_temp(SNAPSHOT, "usage.jsonl");
         let deps = test_deps(accounts, snaps, Arc::new(MockTmuxQuery::new()));
         let reg = build_tool_registry(&deps);
-        assert_eq!(reg.count(), 8);
+        assert_eq!(reg.count(), 14, "expected 8 EA1 + 6 EA2 tools");
         for name in [
+            // EA1
             "evy_usage",
             "evy_sessions",
             "evy_workers",
@@ -1044,8 +1501,141 @@ codex-c | openai-codex | c@x.com | /tmp/codex-c | codex box
             "evy_spawn_worker",
             "evy_kill_worker",
             "evy_notify_operator",
+            // EA2
+            "tinyfish_search",
+            "tinyfish_fetch",
+            "web_search",
+            "web_fetch",
+            "tinyfish_agent",
+            "tinyfish_agent_async",
         ] {
             assert!(reg.contains(name), "missing tool {name}");
+        }
+    }
+
+    // ── EA2 unit tests ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn tinyfish_search_tool_errors_without_client() {
+        let tool = TinyfishSearchTool { client: None };
+        let err = tool
+            .execute(&json!({"query": "rust async"}))
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("tinyfish_api_key not configured"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tinyfish_search_tool_requires_query() {
+        let tool = TinyfishSearchTool { client: None };
+        let err = tool.execute(&json!({})).await.unwrap_err();
+        assert!(err.contains("`query` is required"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn tinyfish_fetch_tool_errors_without_client() {
+        let tool = TinyfishFetchTool { client: None };
+        let err = tool
+            .execute(&json!({"url": "https://example.com"}))
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("tinyfish_api_key not configured"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tinyfish_fetch_tool_requires_url() {
+        let tool = TinyfishFetchTool { client: None };
+        let err = tool.execute(&json!({})).await.unwrap_err();
+        assert!(err.contains("`url` is required"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn web_search_tool_errors_without_client() {
+        let tool = WebSearchTool { client: None };
+        let err = tool.execute(&json!({"query": "test"})).await.unwrap_err();
+        assert!(
+            err.contains("tinyfish_api_key not configured"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn web_fetch_tool_errors_without_client() {
+        let tool = WebFetchTool { client: None };
+        let err = tool
+            .execute(&json!({"url": "https://example.com"}))
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("tinyfish_api_key not configured"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tinyfish_agent_tool_errors_without_client() {
+        let tool = TinyfishAgentTool { client: None };
+        let err = tool
+            .execute(&json!({"task": "click button", "starting_url": "https://example.com"}))
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("tinyfish_api_key not configured"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tinyfish_agent_tool_requires_task_and_url() {
+        let tool = TinyfishAgentTool { client: None };
+        let err = tool
+            .execute(&json!({"starting_url": "https://x.com"}))
+            .await
+            .unwrap_err();
+        assert!(err.contains("`task` is required"), "got: {err}");
+        let err2 = tool.execute(&json!({"task": "click"})).await.unwrap_err();
+        assert!(err2.contains("`starting_url` is required"), "got: {err2}");
+    }
+
+    #[tokio::test]
+    async fn tinyfish_agent_async_tool_errors_without_client() {
+        let tool = TinyfishAgentAsyncTool { client: None };
+        let err = tool
+            .execute(&json!({"task": "scrape", "starting_url": "https://example.com"}))
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("tinyfish_api_key not configured"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_specs_have_addl_properties_false() {
+        // Ensure every EA2 tool spec carries additionalProperties:false
+        // (Anthropic tool-use requires it).
+        let tools: Vec<Box<dyn EvyTool>> = vec![
+            Box::new(TinyfishSearchTool { client: None }),
+            Box::new(TinyfishFetchTool { client: None }),
+            Box::new(WebSearchTool { client: None }),
+            Box::new(WebFetchTool { client: None }),
+            Box::new(TinyfishAgentTool { client: None }),
+            Box::new(TinyfishAgentAsyncTool { client: None }),
+        ];
+        for tool in &tools {
+            let spec = tool.spec();
+            assert_eq!(
+                spec.input_schema["additionalProperties"],
+                json!(false),
+                "tool {} missing additionalProperties:false",
+                spec.name
+            );
         }
     }
 

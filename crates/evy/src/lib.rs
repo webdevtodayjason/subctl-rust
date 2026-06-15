@@ -90,6 +90,8 @@ use evy_memory::{
 };
 use evy_policy::{check_command_simple, load_policy, Mode};
 use evy_providers::{ClaudeCodeProvider, CodexProvider, DeepSeekProvider, HmacKey};
+use evy_research::automation::{AutomationClient, AutomationConfig};
+use evy_research::{ResearchClient, TinyFishClient, TinyFishConfig};
 use evy_scheduler::{Job, JobAction, JobId, RunOutcome, Scheduler};
 use evy_skills::SkillRegistry;
 use evy_thinking::{
@@ -530,6 +532,31 @@ pub async fn run_daemon_with_shutdown(
     // dashboard surface reads/writes (worker registry, broadcaster,
     // policy, watchdog diag) so chat answers and dashboard rows can
     // never disagree.
+    //
+    // EA2 — Resolve the TinyFish API key. When absent the research/
+    // automation handles are `None`; tools surface a structured error
+    // rather than preventing daemon boot.
+    let tinyfish_api_key: Option<String> = {
+        // Priority 1: `[research].api_key` from the loaded config — this
+        // already absorbs the `EVY_RESEARCH__API_KEY` figment env layer.
+        config.research.api_key.clone().or_else(|| {
+            // Priority 2: bare `TINYFISH_API_KEY` env var fallback.
+            std::env::var("TINYFISH_API_KEY").ok()
+        })
+    };
+    let (research_client, automation_client): (
+        Option<Arc<dyn ResearchClient>>,
+        Option<Arc<AutomationClient>>,
+    ) = if let Some(ref token) = tinyfish_api_key {
+        let rc: Arc<dyn ResearchClient> = Arc::new(TinyFishClient::new(TinyFishConfig::new(token)));
+        let ac = Arc::new(AutomationClient::new(AutomationConfig::new(token)));
+        tracing::info!("EA2: TinyFish research + automation clients constructed");
+        (Some(rc), Some(ac))
+    } else {
+        tracing::info!("EA2: tinyfish_api_key not configured — research/automation tools disabled");
+        (None, None)
+    };
+
     let agency_deps = agency::AgencyDeps {
         workers: worker_registry.clone(),
         broadcaster: event_broadcaster.clone(),
@@ -539,6 +566,8 @@ pub async fn run_daemon_with_shutdown(
         telegram: telegram_bridge.clone(),
         accounts_conf: crate::state::accounts_conf_path(),
         snapshots: agency::usage_snapshots_path(),
+        research: research_client,
+        automation: automation_client,
     };
     let agency_tools = Arc::new(agency::build_tool_registry(&agency_deps));
     let live_status: Arc<dyn LiveStatusSource> = Arc::new(agency::build_live_status(&agency_deps));

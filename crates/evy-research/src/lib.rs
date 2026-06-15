@@ -37,6 +37,7 @@
 
 #![warn(missing_docs)]
 
+pub mod automation;
 pub mod client;
 pub mod error;
 pub mod tinyfish;
@@ -44,6 +45,10 @@ pub mod types;
 
 // ── Public re-exports — the surface daemon-side code consumes ──────────
 
+pub use automation::{
+    AsyncRunId, AutomationClient, AutomationConfig, AutomationRequest, AutomationResult,
+    DEFAULT_AUTOMATION_ENDPOINT, DEFAULT_MAX_DURATION_SECONDS, DEFAULT_RUN_STATUS_ENDPOINT,
+};
 pub use client::ResearchClient;
 pub use error::{ResearchError, Result};
 pub use tinyfish::{

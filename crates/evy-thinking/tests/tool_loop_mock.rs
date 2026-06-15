@@ -469,3 +469,325 @@ async fn lm_studio_stream_respond_with_tools_active_emits_single_chunk() {
     assert_eq!(body["stream"], false);
     assert!(body.get("tools").is_some());
 }
+
+// ─── EA2 — web-research tools round-trip ──────────────────────────────────
+//
+// The EA2 search/fetch tools wrap an `Arc<dyn ResearchClient>` and shape
+// its output into the same JSON envelope the daemon's `agency.rs` emits.
+// The concrete tool structs live in the `evy` crate (which depends on
+// `evy-thinking`, so they can't be reached from here without a cycle).
+// We re-create the exact adapter shape over a *real* `TinyFishClient`
+// pointed at a wiremock TinyFish server, then drive it through the
+// Anthropic tool loop against a second wiremock server. This proves the
+// full path: LLM tool_use -> tool hits TinyFish over HTTP -> structured
+// result echoed back into the next request body.
+
+use evy_research::{ResearchClient, TinyFishClient, TinyFishConfig};
+
+/// Mirror of `evy::agency::TinyfishSearchTool` — wraps a `ResearchClient`
+/// and renders the same `{ok, query, count_returned, results[...]}`
+/// envelope the daemon uses.
+struct ResearchSearchTool {
+    client: Arc<dyn ResearchClient>,
+}
+
+#[async_trait]
+impl EvyTool for ResearchSearchTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "tinyfish_search".into(),
+            description: "live web search".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+        }
+    }
+    async fn execute(&self, input: &Value) -> Result<String, String> {
+        let query = input
+            .get("query")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "`query` is required and must be a non-empty string".to_string())?;
+        let results = self
+            .client
+            .search(query, 10)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(json!({
+            "ok": true,
+            "query": query,
+            "count_returned": results.len(),
+            "results": results.iter().map(|r| json!({
+                "title": r.title,
+                "url": r.url,
+                "snippet": r.snippet,
+                "source_tier": format!("{:?}", r.source_tier),
+            })).collect::<Vec<_>>(),
+        })
+        .to_string())
+    }
+}
+
+/// Mirror of `evy::agency::TinyfishFetchTool`.
+struct ResearchFetchTool {
+    client: Arc<dyn ResearchClient>,
+}
+
+#[async_trait]
+impl EvyTool for ResearchFetchTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "tinyfish_fetch".into(),
+            description: "URL -> markdown".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {"url": {"type": "string"}},
+                "required": ["url"],
+                "additionalProperties": false
+            }),
+        }
+    }
+    async fn execute(&self, input: &Value) -> Result<String, String> {
+        let url = input
+            .get("url")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "`url` is required and must be a non-empty string".to_string())?;
+        let res = self
+            .client
+            .fetch_content(url)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(json!({
+            "ok": true,
+            "url": res.url,
+            "title": res.title,
+            "format": res.content_type,
+            "markdown": res.content,
+            "markdown_length": res.content.len(),
+        })
+        .to_string())
+    }
+}
+
+/// Build a `TinyFishClient` whose search + fetch endpoints both point at
+/// the given wiremock base URL.
+fn tinyfish_client(base: &str) -> Arc<dyn ResearchClient> {
+    let mut cfg = TinyFishConfig::new("test-token");
+    cfg.search_endpoint = format!("{base}/search");
+    cfg.fetch_endpoint = format!("{base}/fetch");
+    Arc::new(TinyFishClient::new(cfg))
+}
+
+#[tokio::test]
+async fn tinyfish_search_round_trip_hits_backend_and_echoes_results() {
+    // Wiremock #1 — TinyFish search backend.
+    let tinyfish = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "query": "rust async runtime",
+            "results": [
+                {"position": 1, "site_name": "tokio.rs",
+                 "title": "Tokio", "snippet": "An async runtime for Rust",
+                 "url": "https://docs.rs/tokio"}
+            ],
+            "total_results": 1,
+            "page": 0
+        })))
+        .expect(1)
+        .mount(&tinyfish)
+        .await;
+
+    // Wiremock #2 — Anthropic Messages API: first asks for the tool,
+    // then produces a final answer built on the tool result.
+    let llm = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "content": [{
+                "type": "tool_use", "id": "toolu_s1", "name": "tinyfish_search",
+                "input": {"query": "rust async runtime"}
+            }],
+            "stop_reason": "tool_use"
+        })))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&llm)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "content": [{"type": "text", "text": "Tokio is the answer."}],
+            "stop_reason": "end_turn"
+        })))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&llm)
+        .await;
+
+    let registry = Arc::new(ToolRegistry::new().with_tool(Arc::new(ResearchSearchTool {
+        client: tinyfish_client(&tinyfish.uri()),
+    })));
+    let backend = AnthropicBackend::new(anthropic_cfg(&llm.uri())).with_tools(registry);
+
+    let out = backend
+        .respond("SYS", &operator_turn("what's a good rust async runtime?"))
+        .await
+        .expect("respond ok");
+    assert_eq!(out, "Tokio is the answer.");
+
+    // The TinyFish backend was actually hit exactly once.
+    let tf_recv = tinyfish.received_requests().await.expect("recorded");
+    assert_eq!(tf_recv.len(), 1, "TinyFish search must be hit once");
+
+    // The second LLM request carries the tool_result with the structured
+    // search envelope the tool produced from the TinyFish response.
+    let llm_recv = llm.received_requests().await.expect("recorded");
+    assert_eq!(llm_recv.len(), 2);
+    let body2: Value = serde_json::from_slice(&llm_recv[1].body).expect("json");
+    let result = &body2["messages"][2]["content"][0];
+    assert_eq!(result["type"], "tool_result");
+    assert_eq!(result["tool_use_id"], "toolu_s1");
+    let payload: Value =
+        serde_json::from_str(result["content"].as_str().expect("string content")).expect("json");
+    assert_eq!(payload["ok"], true);
+    assert_eq!(payload["count_returned"], 1);
+    assert_eq!(payload["results"][0]["url"], "https://docs.rs/tokio");
+    // docs.* host -> Reference tier classification flows through.
+    assert_eq!(payload["results"][0]["source_tier"], "Reference");
+    assert!(result.get("is_error").is_none());
+}
+
+#[tokio::test]
+async fn tinyfish_fetch_round_trip_hits_backend_and_echoes_markdown() {
+    let tinyfish = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/fetch"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [{
+                "url": "https://example.com/article",
+                "final_url": "https://example.com/article",
+                "title": "An Article",
+                "format": "markdown",
+                "text": "# An Article\n\nBody text here."
+            }],
+            "errors": []
+        })))
+        .expect(1)
+        .mount(&tinyfish)
+        .await;
+
+    let llm = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "content": [{
+                "type": "tool_use", "id": "toolu_f1", "name": "tinyfish_fetch",
+                "input": {"url": "https://example.com/article"}
+            }],
+            "stop_reason": "tool_use"
+        })))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&llm)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "content": [{"type": "text", "text": "Summarized."}],
+            "stop_reason": "end_turn"
+        })))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&llm)
+        .await;
+
+    let registry = Arc::new(ToolRegistry::new().with_tool(Arc::new(ResearchFetchTool {
+        client: tinyfish_client(&tinyfish.uri()),
+    })));
+    let backend = AnthropicBackend::new(anthropic_cfg(&llm.uri())).with_tools(registry);
+
+    let out = backend
+        .respond("SYS", &operator_turn("read this page"))
+        .await
+        .expect("respond ok");
+    assert_eq!(out, "Summarized.");
+
+    let tf_recv = tinyfish.received_requests().await.expect("recorded");
+    assert_eq!(tf_recv.len(), 1, "TinyFish fetch must be hit once");
+
+    let llm_recv = llm.received_requests().await.expect("recorded");
+    let body2: Value = serde_json::from_slice(&llm_recv[1].body).expect("json");
+    let result = &body2["messages"][2]["content"][0];
+    assert_eq!(result["tool_use_id"], "toolu_f1");
+    let payload: Value =
+        serde_json::from_str(result["content"].as_str().expect("string content")).expect("json");
+    assert_eq!(payload["ok"], true);
+    assert_eq!(payload["format"], "markdown");
+    assert!(payload["markdown"]
+        .as_str()
+        .expect("markdown string")
+        .contains("Body text here"));
+}
+
+#[tokio::test]
+async fn tinyfish_search_backend_http_error_surfaces_as_recoverable_tool_result() {
+    // TinyFish returns 500 — the tool surfaces a structured error string,
+    // which the loop must render as an `is_error` tool_result (recoverable)
+    // rather than failing the whole turn.
+    let tinyfish = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("upstream boom"))
+        .mount(&tinyfish)
+        .await;
+
+    let llm = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "content": [{
+                "type": "tool_use", "id": "toolu_e1", "name": "tinyfish_search",
+                "input": {"query": "anything"}
+            }],
+            "stop_reason": "tool_use"
+        })))
+        .up_to_n_times(1)
+        .mount(&llm)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "content": [{"type": "text", "text": "Search is down right now."}],
+            "stop_reason": "end_turn"
+        })))
+        .up_to_n_times(1)
+        .mount(&llm)
+        .await;
+
+    let registry = Arc::new(ToolRegistry::new().with_tool(Arc::new(ResearchSearchTool {
+        client: tinyfish_client(&tinyfish.uri()),
+    })));
+    let backend = AnthropicBackend::new(anthropic_cfg(&llm.uri())).with_tools(registry);
+
+    let out = backend
+        .respond("SYS", &operator_turn("search please"))
+        .await
+        .expect("backend HTTP errors are recoverable tool results");
+    assert_eq!(out, "Search is down right now.");
+
+    let llm_recv = llm.received_requests().await.expect("recorded");
+    let body2: Value = serde_json::from_slice(&llm_recv[1].body).expect("json");
+    let result = &body2["messages"][2]["content"][0];
+    assert_eq!(result["is_error"], true);
+    assert!(result["content"]
+        .as_str()
+        .expect("error string")
+        .contains("500"));
+}

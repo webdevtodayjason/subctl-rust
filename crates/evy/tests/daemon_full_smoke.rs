@@ -135,6 +135,7 @@ async fn daemon_full_smoke_serves_health_jobs_and_shuts_down() -> Result<()> {
         },
         skills: SkillsConfig::default(),
         thinking_partner: None,
+        research: evy::config::ResearchConfig::default(),
     };
 
     let shutdown = CancellationToken::new();
@@ -285,6 +286,7 @@ async fn daemon_creates_missing_playbook_dir() -> Result<()> {
         },
         skills: SkillsConfig::default(),
         thinking_partner: None,
+        research: evy::config::ResearchConfig::default(),
     };
 
     let shutdown = CancellationToken::new();

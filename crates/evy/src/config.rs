@@ -74,6 +74,12 @@ pub struct Config {
     /// `POST /api/evy/chat` endpoint then returns 503. Phase 6.
     #[serde(default)]
     pub thinking_partner: Option<ThinkingPartnerSectionConfig>,
+    /// EA2 — optional web-research configuration (TinyFish API key,
+    /// custom endpoints). Defaulted so a fresh install boots without
+    /// any research config; tools requiring the key surface a clear
+    /// error when called without it.
+    #[serde(default)]
+    pub research: ResearchConfig,
 }
 
 /// `[scheduler]` table.
@@ -531,6 +537,44 @@ fn default_accounts_conf_path() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/"));
     home.join(".config").join("subctl").join("accounts.conf")
+}
+
+// ─── EA2 — research ───────────────────────────────────────────────────
+
+/// `[research]` table — TinyFish API key and optional endpoint overrides
+/// for the six EA2 web-research / automation tools.
+///
+/// # Secret hygiene
+///
+/// `api_key` is never written to logs: [`ResearchConfig::Debug`] is
+/// implemented manually and redacts the field.  Prefer an env var
+/// (`EVY_RESEARCH__API_KEY` or `TINYFISH_API_KEY`) over hardcoding the
+/// key in the committed TOML.
+///
+/// # Defaults
+///
+/// When the `[research]` section is omitted the daemon boots cleanly.
+/// Calling a research tool without an API key yields a structured error
+/// in the tool result rather than a daemon boot failure.
+#[derive(Clone, Default, Deserialize, Serialize)]
+pub struct ResearchConfig {
+    /// TinyFish API key.  `None` = not configured; tools surface a
+    /// structured error.  Resolved (in the daemon boot path) as:
+    /// `[research].api_key` TOML field — also settable via the
+    /// figment env layer as `EVY_RESEARCH__API_KEY` — then a bare
+    /// `TINYFISH_API_KEY` env var as a fallback.
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+/// Manual `Debug` to redact the API key — a stray `tracing!(?config)`
+/// must never write the secret to the log file.
+impl std::fmt::Debug for ResearchConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResearchConfig")
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 impl Config {

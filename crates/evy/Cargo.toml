@@ -25,6 +25,9 @@ evy-providers = { workspace = true }
 evy-scheduler = { workspace = true }
 evy-comms = { workspace = true }
 evy-memory = { workspace = true }
+# EA2 — research/automation tools (tinyfish_search, tinyfish_fetch,
+# web_search, web_fetch, tinyfish_agent, tinyfish_agent_async).
+evy-research = { workspace = true }
 # Phase 6 — chat surface. The daemon optionally constructs a
 # ThinkingPartner and hands it to evy-comms via DaemonAppState.
 evy-thinking = { workspace = true }
