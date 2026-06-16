@@ -265,7 +265,10 @@ Contract: port ~26 v3 agency tools natively into v4 (web/tinyfish incl. browser-
 
 **MERGE PHASE (orchestrator, 2026-06-15):**
 - Orch independent re-verify of all 3: A `48f84c8` GREEN, B `d1907bf` GREEN. C `7bda685` **FAILED clippy** on my clean run — `empty_line_after_doc_comments` at claude_code.rs:664 (a PRE-EXISTING baseline lint; research+knowledge boy-scout-removed it, integrations-Opus wrongly reverted it; its "clippy PASS" was incrementally cached = false green, caught by independent verification). Merge auto-resolves: research/knowledge remove the line, integrations leaves baseline → 3-way merge keeps removal, no conflict → merged tree clippy-clean.
-- A fast-forward merged → main `48f84c8`. B preview = 6 keep-both conflicts (agency.rs, config.rs, lib.rs, 3 test fixtures). Dispatched ONE Opus integrator to union-merge B+C into main, regen Cargo.lock, green the full gate. Expected merged registry = EA1 8 + EA2 (6+7+11) = 32 tools.
+- A fast-forward merged → main `48f84c8`. A dispatched Opus integrator STALLED mid-merge (stream-watchdog, infra) leaving a half-merge; reset to clean + recovered the stashed ledger (`ec65a43`). Orchestrator then did the merge INLINE.
+- **B (knowledge) merged → `af057a0`** — 17 keep-both union hunks resolved by hand; gate green (`cargo test --workspace` exit 0; registry 21 tools).
+- **C (integrations) merged → `11474b1`** — 20+ hunks; resolved by taking `--ours` (main) for agency.rs/config.rs then splicing integrations' tool-def + registry blocks via script; deduped `crates/evy/Cargo.toml` (auto-merge duplicated evy-secrets/reqwest); added the missing `TokioCommand` import. Gate green (build + fmt + clippy + `cargo test --workspace` exit 0).
+- **EA2 MERGE COMPLETE 2026-06-15 — main = `11474b1`, 32 tools registered (8 EA1 + 24 EA2), orch-verified gate-green.** REMAINING (operator-in-the-loop): deploy (cp→mv + kickstart) → no-fallback proof → live conversion act → flip `PARITY_CENSUS.md` Class-2 rows → ship to M3. Open: rider R1 (`evy_tool_audit` prod log filter), telegram voice checkpoint. NOT deployed — binary still `69522a0`.
 
 ## Decision Log — EA2
 
