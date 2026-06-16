@@ -32,11 +32,19 @@ evy-research = { workspace = true }
 # ThinkingPartner and hands it to evy-comms via DaemonAppState.
 evy-thinking = { workspace = true }
 evy-skills = { workspace = true }
+# EA2 — context7 tool resolves CONTEXT7_API_KEY via the secrets chain.
+evy-secrets = { path = "../evy-secrets", version = "0.1.0" }
 # W5 — watchdog framework. The daemon boots a WatchdogDiagRegistry and arms
 # the framework's HeartbeatWatchdog into it so /api/evy/watchdogs/diag has
 # live data. Direct path dep (not in [workspace.dependencies]) — evy is the
 # first and only consumer of evy-watchdog so far.
 evy-watchdog = { path = "../evy-watchdog", version = "0.1.0" }
+
+# EA2 — context7 tool makes JSON-RPC HTTP calls to mcp.context7.com.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
 
 # Runtime + observability
 tokio = { workspace = true }

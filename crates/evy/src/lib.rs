@@ -556,6 +556,14 @@ pub async fn run_daemon_with_shutdown(
         tracing::info!("EA2: tinyfish_api_key not configured — research/automation tools disabled");
         (None, None)
     };
+    // EA2 — Cognee client for the knowledge_graph_* tools. Constructed
+    // from the [cognee] config section; defaults to http://127.0.0.1:8745
+    // with no auth so an operator without Cognee still boots cleanly.
+    let cognee_client = Arc::new(evy_memory::CogneeClient::new(evy_memory::CogneeConfig {
+        endpoint: config.cognee.endpoint.clone(),
+        api_key: config.cognee.api_key.clone(),
+        timeout_secs: config.cognee.timeout_secs,
+    }));
 
     let agency_deps = agency::AgencyDeps {
         workers: worker_registry.clone(),
@@ -568,6 +576,8 @@ pub async fn run_daemon_with_shutdown(
         snapshots: agency::usage_snapshots_path(),
         research: research_client,
         automation: automation_client,
+        cognee: cognee_client,
+        context7: config.context7.clone(),
     };
     let agency_tools = Arc::new(agency::build_tool_registry(&agency_deps));
     let live_status: Arc<dyn LiveStatusSource> = Arc::new(agency::build_live_status(&agency_deps));

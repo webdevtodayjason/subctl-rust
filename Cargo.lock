@@ -753,6 +753,7 @@ dependencies = [
  "evy-providers",
  "evy-research",
  "evy-scheduler",
+ "evy-secrets",
  "evy-skills",
  "evy-thinking",
  "evy-watchdog",

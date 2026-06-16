@@ -136,6 +136,80 @@ struct RecallHit {
     metadata: serde_json::Value,
 }
 
+// ── graph wire types ────────────────────────────────────────────────
+//
+// Used by the three EA2 knowledge-graph agency tools. Kept private to
+// this module — callers see the structured return types below.
+
+#[derive(Debug, Serialize)]
+struct GraphNeighborsRequest<'a> {
+    node_id: &'a str,
+    depth: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relation: Option<&'a str>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphNeighborsResponse {
+    #[serde(default)]
+    node: serde_json::Value,
+    #[serde(default)]
+    neighbors: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+struct GraphPathRequest<'a> {
+    from: &'a str,
+    to: &'a str,
+    max_hops: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphPathResponse {
+    #[serde(default)]
+    nodes: Vec<serde_json::Value>,
+    #[serde(default)]
+    edges: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+struct GraphQueryRequest<'a> {
+    query: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    params: Option<&'a serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphQueryResponse {
+    #[serde(default)]
+    rows: Vec<serde_json::Value>,
+}
+
+/// Neighbors result from [`CogneeClient::graph_neighbors`].
+#[derive(Debug, Clone)]
+pub struct CogneeNeighborsResult {
+    /// The node itself (raw JSON from Cognee).
+    pub node: serde_json::Value,
+    /// Direct neighbors at the requested depth.
+    pub neighbors: Vec<serde_json::Value>,
+}
+
+/// Path result from [`CogneeClient::graph_path`].
+#[derive(Debug, Clone)]
+pub struct CogneePathResult {
+    /// Nodes along the shortest path.
+    pub nodes: Vec<serde_json::Value>,
+    /// Edges along the shortest path.
+    pub edges: Vec<serde_json::Value>,
+}
+
+/// Query result from [`CogneeClient::graph_query`].
+#[derive(Debug, Clone)]
+pub struct CogneeQueryResult {
+    /// Rows returned by the graph DSL / Cypher query.
+    pub rows: Vec<serde_json::Value>,
+}
+
 // ── client ──────────────────────────────────────────────────────────
 
 /// HTTP client bound to a single Cognee endpoint.
@@ -284,6 +358,106 @@ impl CogneeClient {
             })
             .collect();
         Ok(out)
+    }
+
+    // ── graph query methods (EA2 knowledge-graph tools) ─────────────
+
+    /// `POST /graph/neighbors` — adjacency of a single node.
+    ///
+    /// Transport failures, non-2xx responses, and parse failures all
+    /// propagate as `Err`. Callers (the `knowledge_graph_*` agency
+    /// tools) gate on [`CogneeClient::health`] first and turn any `Err`
+    /// here into a clean error string for the model.
+    pub async fn graph_neighbors(
+        &self,
+        node_id: &str,
+        depth: u32,
+        relation: Option<&str>,
+    ) -> Result<CogneeNeighborsResult> {
+        let url = format!("{}/graph/neighbors", self.endpoint);
+        let body = GraphNeighborsRequest {
+            node_id,
+            depth,
+            relation,
+        };
+        let req = self.http.post(&url).json(&body);
+        let req = if let Some(token) = &self.api_key {
+            req.bearer_auth(token)
+        } else {
+            req
+        };
+        let resp = req.send().await.map_err(error::from_reqwest)?;
+        let status = resp.status();
+        if !status.is_success() {
+            let detail = resp.text().await.unwrap_or_default();
+            return Err(error::cognee_status(
+                status.as_u16(),
+                detail.chars().take(400).collect::<String>(),
+            ));
+        }
+        let parsed: GraphNeighborsResponse = resp.json().await.map_err(error::from_reqwest)?;
+        Ok(CogneeNeighborsResult {
+            node: parsed.node,
+            neighbors: parsed.neighbors,
+        })
+    }
+
+    /// `POST /graph/path` — shortest path between two nodes.
+    pub async fn graph_path(
+        &self,
+        from: &str,
+        to: &str,
+        max_hops: u32,
+    ) -> Result<CogneePathResult> {
+        let url = format!("{}/graph/path", self.endpoint);
+        let body = GraphPathRequest { from, to, max_hops };
+        let req = self.http.post(&url).json(&body);
+        let req = if let Some(token) = &self.api_key {
+            req.bearer_auth(token)
+        } else {
+            req
+        };
+        let resp = req.send().await.map_err(error::from_reqwest)?;
+        let status = resp.status();
+        if !status.is_success() {
+            let detail = resp.text().await.unwrap_or_default();
+            return Err(error::cognee_status(
+                status.as_u16(),
+                detail.chars().take(400).collect::<String>(),
+            ));
+        }
+        let parsed: GraphPathResponse = resp.json().await.map_err(error::from_reqwest)?;
+        Ok(CogneePathResult {
+            nodes: parsed.nodes,
+            edges: parsed.edges,
+        })
+    }
+
+    /// `POST /graph/query` — raw Cypher / Cognee DSL query.
+    pub async fn graph_query(
+        &self,
+        query: &str,
+        params: Option<&serde_json::Value>,
+    ) -> Result<CogneeQueryResult> {
+        let url = format!("{}/graph/query", self.endpoint);
+        let body = GraphQueryRequest { query, params };
+        let req = self.http.post(&url).json(&body);
+        let req = if let Some(token) = &self.api_key {
+            req.bearer_auth(token)
+        } else {
+            req
+        };
+        let resp = req.send().await.map_err(error::from_reqwest)?;
+        let status = resp.status();
+        if !status.is_success() {
+            let detail = resp.text().await.unwrap_or_default();
+            return Err(error::cognee_status(
+                status.as_u16(),
+                detail.chars().take(400).collect::<String>(),
+            ));
+        }
+        let parsed: GraphQueryResponse = resp.json().await.map_err(error::from_reqwest)?;
+        Ok(CogneeQueryResult { rows: parsed.rows })
     }
 }
 

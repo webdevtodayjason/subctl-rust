@@ -1,0 +1,247 @@
+# subctl self-introspection knowledge base — v4.0.0 (EA2, 2026-06-15)
+# Format: TOON (token-efficient key:value). Comments "#" are section summaries.
+# Top-level keys = sections loadable via system_subctl_knowledge { section: "<name>" }.
+#
+# This is the v4 Rust daemon knowledge asset. It supersedes the v3
+# TypeScript TOON at components/evy/knowledge/subctl.toon. The daemon
+# embeds this file at compile time (include_str!) — no runtime file-path
+# resolution, no hot-reload. A daemon rebuild is required to update.
+#
+# Sections: overview, architecture, crates, agency_tools, http_routes,
+#           config, policy, secrets, memory, skills, cognee, context7,
+#           providers, scheduler, comms, update_workflow, version_history.
+
+overview:
+  # what subctl v4 is: a Rust daemon rewrite of the v3 TypeScript agentic harness.
+  name: subctl v4 (Rust daemon, "Evy")
+  tagline: Production-grade Rust rewrite of the multi-account Claude orchestrator.
+  series: v4.x — Rust rewrite under crates/. v3 (TypeScript/Bun) runs in parallel until cutover.
+  current_status: EA2 — EA1 agency tools shipped; EA2 adds 7 read-only knowledge tools (this wave).
+  primary_operator: Jason Brashear (MSP owner, 30+ years IT, Cisco CCIE / RHCE).
+  design_philosophy:
+    - Local-first. Runs on operator hardware (M3 Ultra, DGX Spark). No SaaS.
+    - Conversational. Evy is a peer with an LLM thinking-partner, not a workflow engine.
+    - Honest. Tool-gated self-knowledge — Evy reads first-party data before stating facts.
+    - Trust as a configurable spectrum (Trusted / Gated / Sealed policy modes).
+    - Compile-time safe. Rust type system catches mismatches at build, not runtime.
+    - Ship fast. Small, frequent commits over big bangs.
+  non_goals:
+    - Not a model. Brings its own thinking-partner (Anthropic / LM Studio / Codex).
+    - Not a code-editor replacement. Dispatches Claude Code workers; doesn't replace them.
+    - Not a SaaS. No cloud, no telemetry, no signup.
+
+architecture:
+  # v4 daemon topology and data-flow.
+  binary: crates/evy/src/main.rs — compiled to `evy` binary.
+  entry_points[3]{name,purpose}:
+    run_daemon,Production long-lived process: full stack on tokio.
+    run_smoke_test,--smoke flag: scheduler + policy + single heartbeat cron + exit.
+    run_daemon_with_shutdown,Testable seam: takes CancellationToken + ready-signal channel.
+  stack_order:
+    1: Scheduler (sqlite cron) + Policy (TOML gate) + Providers (claude-code / codex).
+    2: Memory substrate (ObservationLog, PlaybookStore, ScoreLedger, OperatorPreferenceModel, FeedbackIngest).
+    3: Comms (EventBroadcaster, AskRegistry, HttpServer, optional TelegramBridge / DiscordBridge).
+    4: Skills registry (walk skills/ directory for SKILL.md manifests).
+    5: Agency surface (ToolRegistry with all EA1+EA2 tools, LiveStatus injector).
+    6: ThinkingPartner (Anthropic / LM Studio / Codex / Stub backends).
+  data_flow:
+    operator_to_evy: POST /api/evy/chat → ThinkingPartner → tool loop → text reply → SSE.
+    evy_to_worker: evy_spawn_worker tool → spawn_worker_shared → tmux session.
+    worker_to_evy: worker writes inbox events → watchdog tails → auto-prompts.
+  persistent_state[5]{path,purpose}:
+    ~/.config/subctl/v4/evy.db,Scheduler sqlite (cron job state).
+    /tmp/evy-observations.db,Observation log (default; operator-overridable in [memory]).
+    /tmp/evy-scores.db,Scoring ledger + feedback ingest.
+    /tmp/evy-preferences.db,Operator-preference model.
+    ~/.config/subctl/v4/usage-snapshots.jsonl,Hourly usage snapshots written by jobs.toml.
+
+crates:
+  # the Rust workspace under subctl-rust/crates/.
+  workspace_members[15]{crate,purpose}:
+    evy-core,Shared primitives: WorkerId / MandateId / WorkerRegistry / Error / Result.
+    evy-policy,Policy TOML loader + Mode enum (Trusted / Gated / Sealed).
+    evy-providers,ClaudeCodeConfig + CodexConfig; AccountsStore; provider trait objects.
+    evy-scheduler,sqlite-backed cron scheduler; jobs.toml sync.
+    evy-secrets,Pluggable secret resolution: EnvBackend → FileBackend → OnePasswordBackend.
+    evy-comms,EventBroadcaster / HttpServer / TelegramBridge / DiscordBridge / AskRegistry.
+    evy-memory,Full learning-loop substrate (ObservationLog / PlaybookStore / ScoreLedger / CogneeClient / NaiveRetriever).
+    evy-research,Research harness (web fetch / multi-source synthesis).
+    evy-skills,SkillRegistry: walks skills/ for SKILL.md manifests; autoload via skill_view tool.
+    evy-thinking,ThinkingPartner backends: Anthropic / LM Studio / Codex / Stub. ToolRegistry + EvyTool trait.
+    evy-tui,Optional terminal UI.
+    evy-chat-tui,Chat-focused TUI.
+    evy-voice,TTS voice bridge.
+    evy-watchdog,TmuxQuery abstraction (RealTmuxQuery + MockTmuxQuery) + WatchdogDiagRegistry.
+    evy,Daemon binary + lib: agency.rs / config.rs / lib.rs / state.rs / dispatch.rs / jobs_file.rs.
+  key_types:
+    EvyTool: async trait in evy-thinking. spec() → ToolSpec { name, description, input_schema }; execute(&Value) → Result<String,String>.
+    ToolRegistry: holds Vec<Arc<dyn EvyTool>>; execute() dispatches by name + audit-logs.
+    AgencyDeps: struct in evy/src/agency.rs holding all handles the tool registry needs at build time.
+
+agency_tools:
+  # all tools registered in build_tool_registry() in crates/evy/src/agency.rs.
+  ea1_read_only[5]{name,purpose}:
+    evy_usage,Latest per-account usage snapshot from usage-snapshots.jsonl (5h% and 7d%).
+    evy_sessions,Active tmux sessions from tmux ls.
+    evy_workers,Worker registry rows (id / provider / status / session / age).
+    evy_watchdogs,Watchdog diagnostics snapshot (kind / status / last_tick / last_error).
+    evy_accounts,accounts.conf roster (alias / provider / email / config_dir). No tokens.
+  ea1_action[3]{name,policy_gated,purpose}:
+    evy_spawn_worker,true,Dispatch a Claude Code worker on a named account with a goal.
+    evy_kill_worker,true,Kill a registered worker by id.
+    evy_notify_operator,false,Send a message to the operator via Telegram.
+  ea2_knowledge[7]{name,purpose}:
+    system_subctl_knowledge,Self-introspection over this TOON asset. No args → list sections; section arg → full content.
+    knowledge_graph_neighbors,Adjacency of a Cognee graph node (depth 1-3; optional relation filter). Reachability-gated.
+    knowledge_graph_path,Shortest path between two Cognee graph nodes. Reachability-gated.
+    knowledge_graph_query,Raw Cypher/DSL query against the Cognee graph. Reachability-gated.
+    context7_resolve,Resolve a library name to a Context7-compatible library ID.
+    context7_docs,Fetch up-to-date library docs by ID and optional topic.
+    context7_health,Verify Context7 is configured (CONTEXT7_API_KEY) and reachable.
+  dispatch_note: evy_spawn_worker refuses non-claude providers this wave. Sealed policy mode blocks all dispatch tools.
+
+http_routes:
+  # v4 daemon HTTP surface (evy-comms, bound on 127.0.0.1:8787 by default).
+  core[6]{method,path,purpose}:
+    GET,/api/evy/health,Liveness + version + cognee_health bit.
+    POST,/api/evy/chat,Enqueue a chat prompt → ThinkingPartner → SSE reply.
+    GET,/api/evy/events,SSE stream of agent events / decisions / notifications.
+    GET,/api/evy/context,System prompt as composed for the next turn.
+    GET,/api/evy/workers,Worker registry rows.
+    GET,/api/evy/watchdogs/diag,Watchdog diagnostic snapshot.
+  orchestration[3]{method,path,purpose}:
+    POST,/api/evy/orchestration/spawn,Spawn a worker (same path evy_spawn_worker uses internally).
+    POST,/api/evy/orchestration/kill,Kill a worker by id.
+    GET,/api/evy/orchestration/list,List registered workers.
+  memory[4]{method,path,purpose}:
+    GET,/api/evy/memory/observations,Recent observation log rows.
+    GET,/api/evy/memory/playbooks,Playbook store listing.
+    POST,/api/evy/memory/feedback,Ingest operator-correction feedback.
+    GET,/api/evy/memory/retrieval,NaiveRetriever query (multi-tier).
+  ask[2]{method,path,purpose}:
+    POST,/api/evy/ask,Enqueue an operator ask (blocking modal).
+    GET,/api/evy/ask/:id,Poll ask status.
+
+config:
+  # config/evy.toml — layered via figment (TOML < EVY_SECTION__KEY env).
+  required_sections[2]{section,key_fields}:
+    scheduler,db_path (sqlite path for cron state).
+    policy,path (policy.toml path).
+  optional_sections[7]{section,key_fields}:
+    providers.claude_code,"config_dir, tmux_session, working_dir, policy_mode, claude_bin?"
+    providers.codex,"codex_home, tmux_session, working_dir, policy_mode, codex_bin?, model?"
+    comms.http,"host (127.0.0.1), port (8787), allow_origins[], static_dir?"
+    comms.telegram,"bot_token [redacted], chat_id, poll_interval_ms (1000), long_poll_timeout_ms (25000)"
+    comms.discord,"bot_token [redacted], channel_id, application_id"
+    memory,"observation_db, playbook_dir, score_db, preferences_db, claude_mem_db?"
+    skills,"directory (skills/), enabled (true)"
+    thinking_partner,"backend (anthropic|lm-studio|codex|stub), model?, max_tokens?, api_key_env?"
+    cognee,"endpoint (http://127.0.0.1:8745), api_key? [redacted], timeout_secs (15)"
+    context7,"api_key [redacted], endpoint (https://mcp.context7.com/mcp), timeout_secs (15)"
+  env_override_pattern: EVY_SCHEDULER__DB_PATH=/tmp/foo.db overrides [scheduler].db_path.
+
+policy:
+  # evy-policy: Trusted / Gated / Sealed modes.
+  modes[3]{mode,dispatch_tools,bash_gate,note}:
+    Trusted,allowed,open,Workers execute freely. Use on isolated hardware.
+    Gated,allowed,prompt-on-flagged,Workers must confirm policy-flagged commands. Default prod posture.
+    Sealed,BLOCKED,n/a,No dispatch from chat. Evy can still read and notify.
+  gate_behaviour: default_mode = Sealed in policy.toml → evy_spawn_worker + evy_kill_worker refuse outright. evy_notify_operator is never blocked.
+  file: operator-authored policy.toml at [policy].path in config.
+
+secrets:
+  # evy-secrets: priority chain for API keys and tokens.
+  resolution_chain[3]{backend,mechanism}:
+    EnvBackend,Uppercase + dash-to-underscore key → std::env. Fastest.
+    FileBackend,JSON object at ~/.config/subctl/secrets.json (operator-managed). chmod 600.
+    OnePasswordBackend,Shells to `op read op://<vault>/<key>` with OP_SERVICE_ACCOUNT_TOKEN.
+  key_names:
+    CONTEXT7_API_KEY: context7_api_key (env) or "context7_api_key" (file).
+    COGNEE_API_KEY: cognee_api_key (env) or "cognee_api_key" (file).
+    ANTHROPIC_API_KEY: anthropic_api_key (env) or the env var named by [thinking_partner].api_key_env.
+  security: SecretValue::Debug redacts the value (shows "<redacted len=N>"). Never logged.
+
+memory:
+  # evy-memory: the learning-loop substrate (8 layers).
+  layers[8]{layer,type,purpose}:
+    1,ObservationLog,Append-only structured event log (daemon_booted / worker_dispatched / etc). sqlite.
+    2,ClaudeMemReader,Read-only consumer of the operator's claude-mem corpus (cross-session priors).
+    3,ScoreLedger,Per-provider × per-task-class effectiveness scores. sqlite.
+    4,PlaybookStore,Operator-authored markdown playbooks. filesystem.
+    5,OperatorPreferenceModel,Evy-owned key/value preference store. sqlite.
+    6,NaiveRetriever,Multi-tier retrieval: interleaves all Tier-3 sources behind Retriever trait.
+    7,FeedbackIngest,Operator-correction feedback rows. sqlite (same as ScoreLedger db).
+    8,CogneeClient,Tier-4 HTTP client: /remember (add_observation) / /recall (query) / /health.
+  cognee_graph:
+    endpoints: /graph/neighbors / /graph/path / /graph/query (EA2 additions).
+    gate: tools check CogneeClient::health() before every graph call; return clear error string if unreachable.
+    probe_ttl_ms: 30000 (reachability cached 30s per tool invocation chain).
+
+skills:
+  # evy-skills: SKILL.md-driven skill catalog.
+  load_pattern: SkillRegistry::load walks [skills].directory for */SKILL.md manifests at daemon boot.
+  autoload: Anthropic backend advertises skill_view tool. Model calls skill_view {name} → skill source is injected into next turn context.
+  capability_brief: ToolRegistry::capability_brief() returns a prompt block of all tool names + descriptions. Empty registry → None (no block sent).
+
+cognee:
+  # Tier-4 graph memory via local Cognee HTTP service.
+  default_endpoint: http://127.0.0.1:8745
+  client: evy_memory::CogneeClient — methods: health() / add_observation() / query() / graph_neighbors() / graph_path() / graph_query().
+  config_section: "[cognee]" in evy.toml; also env EVY_COGNEE__ENDPOINT / EVY_COGNEE__API_KEY.
+  not_running: knowledge_graph_* tools surface a descriptive error string (not a panic) if Cognee is down.
+  memory_write_policy: Only PromotionTicker writes to Cognee (add_observation). Agency tools are READ-ONLY against the graph.
+
+context7:
+  # Up-to-date library docs via Context7 MCP HTTP gateway.
+  endpoint: https://mcp.context7.com/mcp (default; overridable via [context7].endpoint).
+  auth: CONTEXT7_API_KEY resolved via evy-secrets chain (env > file > 1password).
+  wire_protocol: JSON-RPC 2.0 POST; tools/call method; handles SSE and JSON responses.
+  tools[3]{name,purpose}:
+    context7_resolve,Resolve library name → Context7 library ID. Sends libraryName + query both (compatibility).
+    context7_docs,Fetch docs by library_id + optional topic. tokens param caps response (default 5000 max 20000).
+    context7_health,Probe connectivity with a minimal resolve-library-id call. Reports key_present + sample_resolved.
+  error_handling: missing key → descriptive config error. HTTP failure → surface status + truncated body.
+
+providers:
+  # coding-agent harness providers (NOT model providers).
+  shipped[2]{slug,binary,auth,notes}:
+    claude,claude CLI,CLAUDE_CONFIG_DIR per account,Full provider — policy-gated. evy_spawn_worker dispatches only claude-provider accounts this wave.
+    codex,codex CLI,CODEX_HOME per account + OAuth JWT,Phase 4 Slice D OAuth device-flow. thinking_partner backend also available.
+  accounts_conf: pipe-delimited at ~/.config/subctl/accounts.conf. Fields: alias | provider | email | config_dir | description.
+
+scheduler:
+  # evy-scheduler: sqlite-backed cron.
+  jobs_file: jobs.toml at [scheduler].jobs_path (or <db_path sibling>/jobs.toml). Synced at boot.
+  job_format: TOML array of tables [[jobs]]: name, cron (unix-cron 5-field), goal (prompt text).
+  hourly_usage_job: Conventional jobs.toml entry writes usage snapshots to usage-snapshots.jsonl.
+
+comms:
+  # evy-comms: multi-channel operator communication surface.
+  channels[3]{channel,config_section,notes}:
+    HTTP/SSE,comms.http,"Axum server on host:port. SSE at /api/evy/events for cockpit live feed."
+    Telegram,comms.telegram,"Long-poll Bot API. Inbound operator messages → AskRegistry. Outbound via TelegramBridge::notify."
+    Discord,comms.discord,"Bot via application_id + bot_token. channel_id is the authorized channel."
+  ask_registry: AskRegistry mediates blocking operator asks across all bridge channels simultaneously.
+  event_broadcaster: Shared across Telegram + Discord + HTTP/SSE so all channels see the same event stream.
+
+update_workflow:
+  # how v4 picks up code changes.
+  binary_update: cargo build --release in subctl-rust/ → replace binary at install path → launchctl unload + load com.subctl.evy.plist.
+  knowledge_update: Edit crates/evy/knowledge/subctl.toon → rebuild binary → restart daemon. The file is include_str!()-embedded, not read at runtime.
+  config_update: Edit config/evy.toml → daemon restart (figment reads at boot only). ENV overrides take effect on next restart.
+  no_hot_reload: v4 loads config + knowledge at boot. No inotify watch. Restart is the update primitive.
+
+version_history:
+  # v4 Rust daemon milestone log.
+  milestones[5]{label,contents}:
+    Phase-1,Scheduler + policy + providers. Smoke test passes (heartbeat cron).
+    Phase-2,Memory substrate (ObservationLog + PlaybookStore + ScoreLedger + Preferences + NaiveRetriever).
+    Phase-3,"Comms stack (HTTP/SSE + Telegram + Discord). Full daemon loop with shutdown token."
+    Phase-4,"Cognee client (evy-memory). Skills registry (evy-skills). FeedbackIngest. Codex OAuth backend."
+    Phase-5,ThinkingPartner backends: Anthropic + LM Studio + Codex + Stub. Skill autoload via skill_view.
+    EA1,"Agency surface: 5 read-only + 3 action tools in build_tool_registry(). LiveStatus injector."
+    EA2,"7 read-only knowledge tools: system_subctl_knowledge + 3 knowledge_graph_* + 3 context7_*."
+  v3_parity_notes:
+    - v3 still runs in parallel on the same host (Bun daemon on :8788, dashboard on :8787).
+    - Cutover: v4 takes over :8787 when [comms.http].static_dir is set and the v3 launchd plist is unloaded.
+    - v4 knowledge asset is v4-accurate. Do NOT copy v3 TOON verbatim — v3 paths / ports / tool names differ.
