@@ -564,6 +564,27 @@ pub async fn run_daemon_with_shutdown(
         api_key: config.cognee.api_key.clone(),
         timeout_secs: config.cognee.timeout_secs,
     }));
+    // EA2 — secrets resolver for the Linear API key: env backend first,
+    // then the operator's JSON secrets file. Constructed here once and
+    // shared into AgencyDeps so the linear tools resolve the key at
+    // execute-time without reading the token at daemon boot.
+    let linear_secrets = {
+        use evy_secrets::{EnvBackend, FileBackend, SecretsBackend, SecretsResolver};
+        let file_path = config
+            .agency
+            .linear
+            .secrets_file
+            .clone()
+            .unwrap_or_else(|| {
+                let home = std::env::var("HOME").unwrap_or_default();
+                std::path::PathBuf::from(format!("{home}/.config/subctl/secrets.json"))
+            });
+        let backends: Vec<Arc<dyn SecretsBackend>> = vec![
+            Arc::new(EnvBackend::new()),
+            Arc::new(FileBackend::new(file_path)),
+        ];
+        Arc::new(SecretsResolver::new(backends))
+    };
 
     let agency_deps = agency::AgencyDeps {
         workers: worker_registry.clone(),
@@ -578,6 +599,9 @@ pub async fn run_daemon_with_shutdown(
         automation: automation_client,
         cognee: cognee_client,
         context7: config.context7.clone(),
+        gh_bin: config.agency.gh.gh_bin.clone(),
+        linear_http: reqwest::Client::new(),
+        linear_secrets,
     };
     let agency_tools = Arc::new(agency::build_tool_registry(&agency_deps));
     let live_status: Arc<dyn LiveStatusSource> = Arc::new(agency::build_live_status(&agency_deps));

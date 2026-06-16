@@ -161,6 +161,7 @@ async fn daemon_boots_with_codex_thinking_partner() -> Result<()> {
         research: evy::config::ResearchConfig::default(),
         cognee: evy::config::CogneeServiceConfig::default(),
         context7: evy::config::Context7Config::default(),
+        agency: evy::config::AgencyConfig::default(),
     };
 
     let shutdown = CancellationToken::new();
@@ -257,6 +258,7 @@ async fn daemon_fails_fast_when_codex_section_missing() -> Result<()> {
         research: evy::config::ResearchConfig::default(),
         cognee: evy::config::CogneeServiceConfig::default(),
         context7: evy::config::Context7Config::default(),
+        agency: evy::config::AgencyConfig::default(),
     };
 
     let shutdown = CancellationToken::new();

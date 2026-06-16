@@ -56,6 +56,7 @@ use evy_thinking::{EvyTool, LiveStatusSource, ToolRegistry, ToolSpec};
 use evy_watchdog::TmuxQuery;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tokio::process::Command as TokioCommand;
 
 use crate::state::{kill_worker_shared, spawn_worker_shared};
 
@@ -1500,6 +1501,12 @@ pub struct AgencyDeps {
     pub cognee: Arc<CogneeClient>,
     /// EA2 — Context7 configuration for the `context7_*` tools.
     pub context7: crate::config::Context7Config,
+    /// Resolved `gh` binary path (absolute; launchd-safe).
+    pub gh_bin: PathBuf,
+    /// HTTP client for Linear GraphQL calls (shared, cheap to clone).
+    pub linear_http: reqwest::Client,
+    /// Secret resolver for `LINEAR_API_KEY` (env → file chain).
+    pub linear_secrets: Arc<SecretsResolver>,
 }
 
 /// Build the full EA1+EA2 tool registry: five read-only tools, three
@@ -1581,6 +1588,60 @@ pub fn build_tool_registry(deps: &AgencyDeps) -> ToolRegistry {
         .with_tool(Arc::new(Context7HealthTool {
             endpoint: deps.context7.endpoint.clone(),
             timeout_secs: deps.context7.timeout_secs,
+        }))
+        // ─── EA2 tools ───────────────────────────────────────────────
+        .with_tool(Arc::new(GhPrListTool {
+            gh_bin: deps.gh_bin.clone(),
+        }))
+        .with_tool(Arc::new(GhPrViewTool {
+            gh_bin: deps.gh_bin.clone(),
+        }))
+        .with_tool(Arc::new(GhPrChecksTool {
+            gh_bin: deps.gh_bin.clone(),
+        }))
+        .with_tool(Arc::new(GhIssueListTool {
+            gh_bin: deps.gh_bin.clone(),
+        }))
+        .with_tool({
+            let lc = Arc::new(LinearClient {
+                http: deps.linear_http.clone(),
+                secrets: deps.linear_secrets.clone(),
+                endpoint: "https://api.linear.app/graphql".to_string(),
+            });
+            Arc::new(LinearListIssuesTool { client: lc })
+        })
+        .with_tool({
+            let lc = Arc::new(LinearClient {
+                http: deps.linear_http.clone(),
+                secrets: deps.linear_secrets.clone(),
+                endpoint: "https://api.linear.app/graphql".to_string(),
+            });
+            Arc::new(LinearSearchTool { client: lc })
+        })
+        .with_tool({
+            let lc = Arc::new(LinearClient {
+                http: deps.linear_http.clone(),
+                secrets: deps.linear_secrets.clone(),
+                endpoint: "https://api.linear.app/graphql".to_string(),
+            });
+            Arc::new(LinearCreateIssueTool { client: lc })
+        })
+        .with_tool({
+            let lc = Arc::new(LinearClient {
+                http: deps.linear_http.clone(),
+                secrets: deps.linear_secrets.clone(),
+                endpoint: "https://api.linear.app/graphql".to_string(),
+            });
+            Arc::new(LinearUpdateIssueTool { client: lc })
+        })
+        .with_tool(Arc::new(TelegramSendTool {
+            telegram: deps.telegram.clone(),
+        }))
+        .with_tool(Arc::new(TelegramSendDigestTool {
+            telegram: deps.telegram.clone(),
+        }))
+        .with_tool(Arc::new(TelegramSendVoiceTool {
+            telegram: deps.telegram.clone(),
         }))
 }
 
@@ -2010,6 +2071,958 @@ impl EvyTool for TinyfishAgentAsyncTool {
     }
 }
 
+// ─── EA2 — gh tools (read-only, shell-out to the `gh` CLI) ─────────────────
+
+/// `gh_pr_list` — list pull requests for a repo via the gh CLI.
+pub struct GhPrListTool {
+    /// Absolute path to the `gh` binary (launchd-safe, never bare `"gh"`).
+    pub gh_bin: PathBuf,
+}
+
+#[async_trait]
+impl EvyTool for GhPrListTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "gh_pr_list".into(),
+            description: "List pull requests for a GitHub repo via the gh CLI. Returns JSON \
+                          with number, title, state, mergeable, headRefName, baseRefName, url, \
+                          and createdAt."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "repo": {
+                        "type": "string",
+                        "description": "GitHub repo in OWNER/REPO format (required)"
+                    },
+                    "state": {
+                        "type": "string",
+                        "enum": ["open", "closed", "merged", "all"],
+                        "description": "PR state filter (default: open)"
+                    },
+                    "head": {
+                        "type": "string",
+                        "description": "Filter by head branch name (optional)"
+                    },
+                    "base": {
+                        "type": "string",
+                        "description": "Filter by base branch name (optional)"
+                    }
+                },
+                "required": ["repo"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    async fn execute(&self, input: &Value) -> std::result::Result<String, String> {
+        let repo = input
+            .get("repo")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or("`repo` is required")?;
+        let state = input.get("state").and_then(Value::as_str).unwrap_or("open");
+        let mut args = vec![
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            state,
+            "--json",
+            "number,title,state,mergeable,headRefName,baseRefName,url,createdAt",
+        ];
+        let head_owned;
+        if let Some(head) = input.get("head").and_then(Value::as_str) {
+            head_owned = head.to_string();
+            args.extend_from_slice(&["--head", &head_owned]);
+        }
+        let base_owned;
+        if let Some(base) = input.get("base").and_then(Value::as_str) {
+            base_owned = base.to_string();
+            args.extend_from_slice(&["--base", &base_owned]);
+        }
+        run_gh(&self.gh_bin, &args).await
+    }
+}
+
+/// `gh_pr_view` — view a single pull request via the gh CLI.
+pub struct GhPrViewTool {
+    /// Absolute path to the `gh` binary (launchd-safe, never bare `"gh"`).
+    pub gh_bin: PathBuf,
+}
+
+#[async_trait]
+impl EvyTool for GhPrViewTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "gh_pr_view".into(),
+            description: "View a single pull request via the gh CLI. Returns JSON with \
+                          number, title, body, state, mergeable, headRefName, baseRefName, \
+                          url, reviews, and comments."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "repo": {
+                        "type": "string",
+                        "description": "GitHub repo in OWNER/REPO format (required)"
+                    },
+                    "pr": {
+                        "type": "integer",
+                        "description": "PR number (required)"
+                    }
+                },
+                "required": ["repo", "pr"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    async fn execute(&self, input: &Value) -> std::result::Result<String, String> {
+        let repo = input
+            .get("repo")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or("`repo` is required")?;
+        let pr = input
+            .get("pr")
+            .and_then(Value::as_u64)
+            .ok_or("`pr` must be an integer")?
+            .to_string();
+        run_gh(
+            &self.gh_bin,
+            &[
+                "pr",
+                "view",
+                &pr,
+                "--repo",
+                repo,
+                "--json",
+                "number,title,body,state,mergeable,headRefName,baseRefName,url,reviews,comments",
+                "--comments",
+            ],
+        )
+        .await
+    }
+}
+
+/// `gh_pr_checks` — get CI check status for a pull request via the gh CLI.
+pub struct GhPrChecksTool {
+    /// Absolute path to the `gh` binary (launchd-safe, never bare `"gh"`).
+    pub gh_bin: PathBuf,
+}
+
+#[async_trait]
+impl EvyTool for GhPrChecksTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "gh_pr_checks".into(),
+            description: "Get CI check status for a pull request via the gh CLI. Returns \
+                          human-readable text with check names, statuses, and URLs."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "repo": {
+                        "type": "string",
+                        "description": "GitHub repo in OWNER/REPO format (required)"
+                    },
+                    "pr": {
+                        "type": "integer",
+                        "description": "PR number (required)"
+                    }
+                },
+                "required": ["repo", "pr"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    async fn execute(&self, input: &Value) -> std::result::Result<String, String> {
+        let repo = input
+            .get("repo")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or("`repo` is required")?;
+        let pr = input
+            .get("pr")
+            .and_then(Value::as_u64)
+            .ok_or("`pr` must be an integer")?
+            .to_string();
+        run_gh(&self.gh_bin, &["pr", "checks", &pr, "--repo", repo]).await
+    }
+}
+
+/// `gh_issue_list` — list issues for a repo via the gh CLI.
+pub struct GhIssueListTool {
+    /// Absolute path to the `gh` binary (launchd-safe, never bare `"gh"`).
+    pub gh_bin: PathBuf,
+}
+
+#[async_trait]
+impl EvyTool for GhIssueListTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "gh_issue_list".into(),
+            description: "List issues for a GitHub repo via the gh CLI. Returns JSON with \
+                          number, title, state, labels, createdAt, updatedAt, and url."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "repo": {
+                        "type": "string",
+                        "description": "GitHub repo in OWNER/REPO format (required)"
+                    },
+                    "state": {
+                        "type": "string",
+                        "enum": ["open", "closed", "all"],
+                        "description": "Issue state filter (default: open)"
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "Filter by label name (optional)"
+                    }
+                },
+                "required": ["repo"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    async fn execute(&self, input: &Value) -> std::result::Result<String, String> {
+        let repo = input
+            .get("repo")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or("`repo` is required")?;
+        let state = input.get("state").and_then(Value::as_str).unwrap_or("open");
+        let mut args = vec![
+            "issue",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            state,
+            "--json",
+            "number,title,state,labels,createdAt,updatedAt,url",
+        ];
+        let label_owned;
+        if let Some(label) = input.get("label").and_then(Value::as_str) {
+            label_owned = label.to_string();
+            args.extend_from_slice(&["--label", &label_owned]);
+        }
+        run_gh(&self.gh_bin, &args).await
+    }
+}
+
+/// Run `gh` with the given args, returning stdout on success or a
+/// human-readable error carrying stderr + exit code on failure.
+async fn run_gh(gh_bin: &Path, args: &[&str]) -> std::result::Result<String, String> {
+    let out = TokioCommand::new(gh_bin)
+        .args(args)
+        .output()
+        .await
+        .map_err(|e| format!("gh exec failed (binary={:?}): {e}", gh_bin))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!(
+            "gh exited {}: {}",
+            out.status,
+            stderr.chars().take(400).collect::<String>()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+// ─── EA2 — Linear GraphQL tools ─────────────────────────────────────────────
+
+/// Shared handle for Linear GraphQL tools.
+///
+/// Constructed once per tool in `build_tool_registry` and wrapped in
+/// `Arc` so multiple tools share the same HTTP client. Injectable in
+/// tests via the tool structs' `client` field.
+pub struct LinearClient {
+    /// Reqwest client for all Linear HTTP calls.
+    pub http: reqwest::Client,
+    /// Secrets resolver for the Linear API key (`linear_api_key`).
+    pub secrets: Arc<SecretsResolver>,
+    /// GraphQL endpoint. Defaults to `https://api.linear.app/graphql`;
+    /// overridden to a mock server URL in tests.
+    pub endpoint: String,
+}
+
+impl LinearClient {
+    /// Resolve the Linear API key through the secrets chain and POST
+    /// a GraphQL request. Returns the parsed JSON response body.
+    async fn graphql(&self, query: &str, variables: Value) -> std::result::Result<Value, String> {
+        let key = self
+            .secrets
+            .resolve("linear_api_key")
+            .await
+            .map_err(|_| {
+                "LINEAR_API_KEY not configured — set the env var or add it to secrets.json"
+                    .to_string()
+            })?
+            .value;
+
+        let resp = self
+            .http
+            .post(&self.endpoint)
+            .header("Authorization", &key)
+            .header("Content-Type", "application/json")
+            .json(&json!({ "query": query, "variables": variables }))
+            .send()
+            .await
+            .map_err(|e| format!("linear request failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!(
+                "linear HTTP {}: {}",
+                status,
+                &body[..body.len().min(400)]
+            ));
+        }
+
+        resp.json::<Value>()
+            .await
+            .map_err(|e| format!("linear JSON decode: {e}"))
+    }
+}
+
+/// `linear_list_issues` — list Linear issues with optional filtering.
+pub struct LinearListIssuesTool {
+    /// Shared Linear GraphQL client (HTTP + secrets + endpoint).
+    pub client: Arc<LinearClient>,
+}
+
+const LINEAR_LIST_QUERY: &str = r#"
+query Issues($filter: IssueFilter, $first: Int) {
+  issues(filter: $filter, first: $first) {
+    nodes { id identifier title priority url state { name } assignee { email name } }
+  }
+}"#;
+
+#[async_trait]
+impl EvyTool for LinearListIssuesTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "linear_list_issues".into(),
+            description: "List Linear issues with optional filters for team, state, and assignee. \
+                          Returns id, identifier, title, priority, url, state, and assignee."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "team_key": {
+                        "type": "string",
+                        "description": "Linear team key (e.g. 'ENG') to filter by (optional)"
+                    },
+                    "state": {
+                        "type": "string",
+                        "description": "Issue state name to filter by (e.g. 'In Progress') (optional)"
+                    },
+                    "assignee_email": {
+                        "type": "string",
+                        "description": "Assignee email to filter by (optional)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max issues to return (default 25, max 100)"
+                    }
+                },
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    async fn execute(&self, input: &Value) -> std::result::Result<String, String> {
+        let limit = input
+            .get("limit")
+            .and_then(Value::as_u64)
+            .unwrap_or(25)
+            .min(100) as i64;
+
+        let mut filter = json!({});
+        if let Some(team_key) = input.get("team_key").and_then(Value::as_str) {
+            filter["team"] = json!({ "key": { "eq": team_key } });
+        }
+        if let Some(state) = input.get("state").and_then(Value::as_str) {
+            filter["state"] = json!({ "name": { "eq": state } });
+        }
+        if let Some(email) = input.get("assignee_email").and_then(Value::as_str) {
+            filter["assignee"] = json!({ "email": { "eq": email } });
+        }
+
+        let body = self
+            .client
+            .graphql(
+                LINEAR_LIST_QUERY,
+                json!({ "filter": filter, "first": limit }),
+            )
+            .await?;
+
+        let nodes = body
+            .pointer("/data/issues/nodes")
+            .cloned()
+            .unwrap_or(json!([]));
+        Ok(serde_json::to_string_pretty(&nodes).unwrap_or_else(|_| nodes.to_string()))
+    }
+}
+
+/// `linear_search` — full-text search across Linear issues.
+pub struct LinearSearchTool {
+    /// Shared Linear GraphQL client (HTTP + secrets + endpoint).
+    pub client: Arc<LinearClient>,
+}
+
+const LINEAR_SEARCH_QUERY: &str = r#"
+query SearchIssues($term: String!, $first: Int) {
+  searchIssues(term: $term, first: $first) {
+    nodes { id identifier title priority url state { name } assignee { email name } }
+  }
+}"#;
+
+#[async_trait]
+impl EvyTool for LinearSearchTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "linear_search".into(),
+            description: "Full-text search across Linear issues. Returns matching issues \
+                          with id, identifier, title, priority, url, state, and assignee."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search term (required)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max results (default 25, max 100)"
+                    }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    async fn execute(&self, input: &Value) -> std::result::Result<String, String> {
+        let term = input
+            .get("query")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or("`query` is required")?;
+        let limit = input
+            .get("limit")
+            .and_then(Value::as_u64)
+            .unwrap_or(25)
+            .min(100) as i64;
+
+        let body = self
+            .client
+            .graphql(LINEAR_SEARCH_QUERY, json!({ "term": term, "first": limit }))
+            .await?;
+
+        let nodes = body
+            .pointer("/data/searchIssues/nodes")
+            .cloned()
+            .unwrap_or(json!([]));
+        Ok(serde_json::to_string_pretty(&nodes).unwrap_or_else(|_| nodes.to_string()))
+    }
+}
+
+/// `linear_create_issue` — create a new Linear issue (WRITE operation).
+pub struct LinearCreateIssueTool {
+    /// Shared Linear GraphQL client (HTTP + secrets + endpoint).
+    pub client: Arc<LinearClient>,
+}
+
+const LINEAR_TEAM_BY_KEY_QUERY: &str = r#"
+query TeamByKey($key: String!) {
+  teams(filter: { key: { eq: $key } }, first: 1) {
+    nodes { id key name }
+  }
+}"#;
+
+const LINEAR_ISSUE_CREATE_MUTATION: &str = r#"
+mutation IssueCreate($input: IssueCreateInput!) {
+  issueCreate(input: $input) {
+    success
+    issue { id identifier url title }
+  }
+}"#;
+
+#[async_trait]
+impl EvyTool for LinearCreateIssueTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "linear_create_issue".into(),
+            description: "Create a new Linear issue. Resolves team_key to a team id, then \
+                          calls issueCreate. Returns the created issue's identifier and URL."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "team_key": {
+                        "type": "string",
+                        "description": "Linear team key (e.g. 'ENG') (required)"
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Issue title (required)"
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Issue description in markdown (optional)"
+                    },
+                    "priority": {
+                        "type": "integer",
+                        "description": "Priority 0 (none) to 4 (urgent) (optional)"
+                    }
+                },
+                "required": ["team_key", "title"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    async fn execute(&self, input: &Value) -> std::result::Result<String, String> {
+        let team_key = input
+            .get("team_key")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or("`team_key` is required")?;
+        let title = input
+            .get("title")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or("`title` is required")?;
+
+        // Step 1: resolve team_key → teamId.
+        let team_body = self
+            .client
+            .graphql(LINEAR_TEAM_BY_KEY_QUERY, json!({ "key": team_key }))
+            .await?;
+        let team_id = team_body
+            .pointer("/data/teams/nodes/0/id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("no Linear team found with key `{team_key}`"))?
+            .to_string();
+
+        // Step 2: build the issue input and create.
+        let mut issue_input = json!({
+            "teamId": team_id,
+            "title": title,
+        });
+        if let Some(desc) = input.get("description").and_then(Value::as_str) {
+            issue_input["description"] = json!(desc);
+        }
+        if let Some(pri) = input.get("priority").and_then(Value::as_u64) {
+            issue_input["priority"] = json!(pri);
+        }
+
+        let create_body = self
+            .client
+            .graphql(
+                LINEAR_ISSUE_CREATE_MUTATION,
+                json!({ "input": issue_input }),
+            )
+            .await?;
+
+        let success = create_body
+            .pointer("/data/issueCreate/success")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !success {
+            return Err("linear issueCreate returned success=false".to_string());
+        }
+        let issue = create_body
+            .pointer("/data/issueCreate/issue")
+            .cloned()
+            .unwrap_or(json!({}));
+        Ok(serde_json::to_string_pretty(&issue).unwrap_or_else(|_| issue.to_string()))
+    }
+}
+
+/// `linear_update_issue` — update state and/or add a comment to a Linear
+/// issue (WRITE operation).
+pub struct LinearUpdateIssueTool {
+    /// Shared Linear GraphQL client (HTTP + secrets + endpoint).
+    pub client: Arc<LinearClient>,
+}
+
+const LINEAR_ISSUE_LOOKUP_QUERY: &str = r#"
+query IssueLookup($id: String!) {
+  issue(id: $id) {
+    id identifier team { id key }
+  }
+}"#;
+
+const LINEAR_WORKFLOW_STATES_QUERY: &str = r#"
+query WorkflowStates($teamId: ID!, $name: String!) {
+  workflowStates(filter: { team: { id: { eq: $teamId } }, name: { eq: $name } }, first: 1) {
+    nodes { id name type }
+  }
+}"#;
+
+const LINEAR_ISSUE_UPDATE_MUTATION: &str = r#"
+mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
+  issueUpdate(id: $id, input: $input) {
+    success
+    issue { id identifier url state { name } }
+  }
+}"#;
+
+const LINEAR_COMMENT_CREATE_MUTATION: &str = r#"
+mutation CommentCreate($input: CommentCreateInput!) {
+  commentCreate(input: $input) {
+    success
+    comment { id url }
+  }
+}"#;
+
+#[async_trait]
+impl EvyTool for LinearUpdateIssueTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "linear_update_issue".into(),
+            description: "Update a Linear issue's state and/or add a comment. At least one \
+                          of `state` or `comment` is required. Resolves state name to state \
+                          id via the team's workflow states."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "issue_id": {
+                        "type": "string",
+                        "description": "Linear issue id or identifier (e.g. 'ENG-123') (required)"
+                    },
+                    "state": {
+                        "type": "string",
+                        "description": "Workflow state name to transition to (optional)"
+                    },
+                    "comment": {
+                        "type": "string",
+                        "description": "Comment body in markdown to add (optional)"
+                    }
+                },
+                "required": ["issue_id"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    async fn execute(&self, input: &Value) -> std::result::Result<String, String> {
+        let issue_id = input
+            .get("issue_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or("`issue_id` is required")?;
+        let new_state = input.get("state").and_then(Value::as_str);
+        let comment_text = input.get("comment").and_then(Value::as_str);
+
+        if new_state.is_none() && comment_text.is_none() {
+            return Err("at least one of `state` or `comment` is required".to_string());
+        }
+
+        // Step 1: look up the issue to get its internal id + team id.
+        let lookup_body = self
+            .client
+            .graphql(LINEAR_ISSUE_LOOKUP_QUERY, json!({ "id": issue_id }))
+            .await?;
+        let internal_id = lookup_body
+            .pointer("/data/issue/id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("no Linear issue found with id `{issue_id}`"))?
+            .to_string();
+        let team_id = lookup_body
+            .pointer("/data/issue/team/id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+
+        let mut results = Vec::new();
+
+        // Step 2: optionally resolve state name → stateId and update.
+        if let Some(state_name) = new_state {
+            let states_body = self
+                .client
+                .graphql(
+                    LINEAR_WORKFLOW_STATES_QUERY,
+                    json!({ "teamId": team_id, "name": state_name }),
+                )
+                .await?;
+            let state_id = states_body
+                .pointer("/data/workflowStates/nodes/0/id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    format!("no workflow state named `{state_name}` found for this team")
+                })?
+                .to_string();
+
+            let update_body = self
+                .client
+                .graphql(
+                    LINEAR_ISSUE_UPDATE_MUTATION,
+                    json!({ "id": internal_id, "input": { "stateId": state_id } }),
+                )
+                .await?;
+            let success = update_body
+                .pointer("/data/issueUpdate/success")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if !success {
+                return Err("linear issueUpdate returned success=false".to_string());
+            }
+            if let Some(issue) = update_body.pointer("/data/issueUpdate/issue") {
+                results.push(format!(
+                    "state updated: {}",
+                    issue
+                        .pointer("/state/name")
+                        .and_then(Value::as_str)
+                        .unwrap_or(state_name)
+                ));
+            }
+        }
+
+        // Step 3: optionally add a comment.
+        if let Some(body) = comment_text {
+            let comment_body = self
+                .client
+                .graphql(
+                    LINEAR_COMMENT_CREATE_MUTATION,
+                    json!({ "input": { "issueId": internal_id, "body": body } }),
+                )
+                .await?;
+            let success = comment_body
+                .pointer("/data/commentCreate/success")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if !success {
+                return Err("linear commentCreate returned success=false".to_string());
+            }
+            let url = comment_body
+                .pointer("/data/commentCreate/comment/url")
+                .and_then(Value::as_str)
+                .unwrap_or("(url unavailable)");
+            results.push(format!("comment added: {url}"));
+        }
+
+        Ok(results.join("; "))
+    }
+}
+
+// ─── EA2 — Telegram tools ────────────────────────────────────────────────────
+
+/// `telegram_send` — send a plain-text message to the operator via Telegram.
+pub struct TelegramSendTool {
+    /// Telegram bridge handle; `None` if `[comms.telegram]` is absent from config.
+    pub telegram: Option<TelegramBridge>,
+}
+
+#[async_trait]
+impl EvyTool for TelegramSendTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "telegram_send".into(),
+            description: "Send a text message to the operator's Telegram chat. Use for \
+                          status updates, alerts, or summaries."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "Message text to send (required)"
+                    },
+                    "markdown": {
+                        "type": "boolean",
+                        "description": "Whether the text contains Markdown (default false — \
+                                        the v4 bridge sends as plain text regardless; \
+                                        field accepted for forward-compatibility)"
+                    }
+                },
+                "required": ["text"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    async fn execute(&self, input: &Value) -> std::result::Result<String, String> {
+        let text = input
+            .get("text")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or("`text` is required")?;
+        let Some(bridge) = &self.telegram else {
+            return Err("telegram is not configured on this daemon".to_string());
+        };
+        bridge
+            .notify(Notification::Note {
+                text: text.to_string(),
+            })
+            .await
+            .map_err(|e| format!("telegram send failed: {e}"))?;
+        Ok("sent".to_string())
+    }
+}
+
+/// `telegram_send_digest` — send a status digest table to Telegram.
+pub struct TelegramSendDigestTool {
+    /// Telegram bridge handle; `None` if `[comms.telegram]` is absent from config.
+    pub telegram: Option<TelegramBridge>,
+}
+
+/// One entry in a digest table.
+#[derive(Debug, serde::Deserialize)]
+struct DigestEntry {
+    project: String,
+    verdict: String,
+    line: String,
+}
+
+fn verdict_emoji(verdict: &str) -> &'static str {
+    match verdict {
+        "green" => "🟢",
+        "amber" => "🟡",
+        "red" => "🔴",
+        _ => "ℹ️",
+    }
+}
+
+#[async_trait]
+impl EvyTool for TelegramSendDigestTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "telegram_send_digest".into(),
+            description: "Send a project-status digest to the operator's Telegram chat. \
+                          Renders a titled table with per-project verdicts (green/amber/red/info)."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Digest title (default 'Portfolio status')"
+                    },
+                    "entries": {
+                        "type": "array",
+                        "description": "Status entries (required)",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "project": { "type": "string" },
+                                "verdict": {
+                                    "type": "string",
+                                    "enum": ["green", "amber", "red", "info"]
+                                },
+                                "line": { "type": "string" }
+                            },
+                            "required": ["project", "verdict", "line"]
+                        }
+                    }
+                },
+                "required": ["entries"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    async fn execute(&self, input: &Value) -> std::result::Result<String, String> {
+        let title = input
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("Portfolio status");
+        let entries_raw = input.get("entries").ok_or("`entries` is required")?;
+        let entries: Vec<DigestEntry> = serde_json::from_value(entries_raw.clone())
+            .map_err(|e| format!("invalid entries: {e}"))?;
+
+        let mut rendered = format!("{title}\n──────────────────────\n");
+        for entry in &entries {
+            let emoji = verdict_emoji(&entry.verdict);
+            rendered.push_str(&format!("{emoji} {}: {}\n", entry.project, entry.line));
+        }
+
+        let Some(bridge) = &self.telegram else {
+            return Err("telegram is not configured on this daemon".to_string());
+        };
+        bridge
+            .notify(Notification::Note { text: rendered })
+            .await
+            .map_err(|e| format!("telegram send failed: {e}"))?;
+        Ok(format!("digest sent ({} entries)", entries.len()))
+    }
+}
+
+/// `telegram_send_voice` — CHECKPOINT: voice not yet wired.
+///
+/// The bridge carries the bot token needed for `sendVoice`, but
+/// `evy-comms` does not yet have the `reqwest/multipart` feature
+/// required to upload audio. This tool returns a clear error
+/// describing what must change to complete the wiring.
+pub struct TelegramSendVoiceTool {
+    /// Telegram bridge handle; carries the bot token used for sendVoice.
+    /// `None` if `[comms.telegram]` is absent from config.
+    pub telegram: Option<TelegramBridge>,
+}
+
+#[async_trait]
+impl EvyTool for TelegramSendVoiceTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "telegram_send_voice".into(),
+            description: "Send a voice note to the operator's Telegram chat. \
+                          CHECKPOINT: requires reqwest/multipart in evy-comms to be wired."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "Text to speak and send as a voice note (required)"
+                    },
+                    "caption": {
+                        "type": "string",
+                        "description": "Optional caption shown under the voice note"
+                    }
+                },
+                "required": ["text"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    async fn execute(&self, _input: &Value) -> std::result::Result<String, String> {
+        // CHECKPOINT — creds present (bridge carries bot_token via
+        // [comms.telegram]) but multipart sendVoice is not yet wired.
+        // To complete:
+        //   1. Add `multipart` to reqwest features in evy-comms/Cargo.toml.
+        //   2. Add a `TelegramBridge::send_voice(audio_bytes, caption)`
+        //      that POSTs a multipart form to `{base_url}/bot{token}/sendVoice`,
+        //      and call it here once evy-voice TTS bytes are available.
+        let creds_present = self.telegram.is_some();
+        Err(format!(
+            "telegram_send_voice not yet wired — add reqwest/multipart to evy-comms to enable \
+             (voice creds present via [comms.telegram]: {creds_present})"
+        ))
+    }
+}
+
 /// Build the [`LiveStatus`] source over the same handles.
 #[must_use]
 pub fn build_live_status(deps: &AgencyDeps) -> LiveStatus {
@@ -2252,6 +3265,11 @@ codex-c | openai-codex | c@x.com | /tmp/codex-c | codex box
                 evy_memory::CogneeConfig::default(),
             )),
             context7: crate::config::Context7Config::default(),
+            gh_bin: std::path::PathBuf::from("gh"),
+            linear_http: reqwest::Client::new(),
+            linear_secrets: Arc::new(SecretsResolver::new(vec![
+                Arc::new(EnvBackend::new()) as Arc<dyn evy_secrets::SecretsBackend>
+            ])),
         }
     }
 
@@ -2263,8 +3281,8 @@ codex-c | openai-codex | c@x.com | /tmp/codex-c | codex box
         let reg = build_tool_registry(&deps);
         assert_eq!(
             reg.count(),
-            21,
-            "EA1 (8) + EA2 research (6) + knowledge (7) = 21 tools"
+            32,
+            "EA1 (8) + EA2 research (6) + knowledge (7) + integrations (11) = 32 tools"
         );
         for name in [
             // EA1
@@ -2292,6 +3310,18 @@ codex-c | openai-codex | c@x.com | /tmp/codex-c | codex box
             "context7_resolve",
             "context7_docs",
             "context7_health",
+            // EA2 integrations
+            "gh_pr_list",
+            "gh_pr_view",
+            "gh_pr_checks",
+            "gh_issue_list",
+            "linear_list_issues",
+            "linear_search",
+            "linear_create_issue",
+            "linear_update_issue",
+            "telegram_send",
+            "telegram_send_digest",
+            "telegram_send_voice",
         ] {
             assert!(reg.contains(name), "missing tool {name}");
         }

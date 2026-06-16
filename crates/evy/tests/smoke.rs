@@ -83,6 +83,9 @@ async fn phase1_smoke_test_runs_cron_job_and_exits_clean() -> anyhow::Result<()>
         research: evy::config::ResearchConfig::default(),
         cognee: evy::config::CogneeServiceConfig::default(),
         context7: evy::config::Context7Config::default(),
+        // EA2 agency integration config — fully defaulted; smoke test
+        // does not exercise gh/linear/telegram tools.
+        agency: evy::config::AgencyConfig::default(),
     };
 
     let report = run_smoke_test(config).await?;
