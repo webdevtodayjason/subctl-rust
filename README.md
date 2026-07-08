@@ -38,11 +38,13 @@ cargo fmt --all -- --check
 
 ## Status
 
-**Phase 0 — scaffold only.** Every `lib.rs` is a `// TODO: Phase 1+` stub.
-The binary boots a tokio runtime, initializes `tracing`, logs a single
-line, and exits. No primitives are wired yet.
+**Built and live.** 15 crates, ~1,240 test fns, zero `todo!()`/`unimplemented!()`
+stubs. The daemon runs as `com.subctl.evy-v4` (HTTP/SSE `:8797`) on two nodes;
+7/7 cutover criteria green (2026-06-09). Evy agency: EA1 (8 tools) live since
+2026-06-11; EA2 (32 tools total) merged at `9b3b534` on 2026-06-15. Remaining
+v3 parity tracked in [`PARITY_CENSUS.md`](./PARITY_CENSUS.md).
 
-See ADR 0020 for the contract each crate will implement.
+See ADR 0020 for the contract each crate implements.
 
 ## License
 
